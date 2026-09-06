@@ -15,5 +15,8 @@
     "astro": "^5.18.2",
     "shiki": "^1.29.2",
     "svelte": "^5.57.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.0-next.6"
   }
 }
