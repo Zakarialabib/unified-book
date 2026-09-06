@@ -1,0 +1,152 @@
+---
+interface Props {
+  text?: string;
+  chapterId?: string;
+}
+const { text = '', chapterId = '' } = Astro.props;
+---
+
+<div class="voice-player" id="voice-player" data-chapter={chapterId} data-text={text}>
+  <button class="lb-play" id="voice-play" type="button" aria-label="Play narration">
+    <svg id="voice-icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v13l11-6.5z" /></svg>
+    <svg id="voice-icon-pause" viewBox="0 0 16 16" aria-hidden="true" style="display:none"><path d="M3 1.5h4v13H3zM9 1.5h4v13H9z" /></svg>
+  </button>
+  <div class="voice-info">
+    <span class="voice-status" id="voice-status">Ready</span>
+    <select id="voice-select"></select>
+    <select id="voice-rate">
+      <option value="0.8">0.8×</option>
+      <option value="0.9">0.9×</option>
+      <option value="1" selected>1×</option>
+      <option value="1.1">1.1×</option>
+      <option value="1.25">1.25×</option>
+      <option value="1.5">1.5×</option>
+    </select>
+  </div>
+  <button class="lb-close" id="voice-stop" type="button" aria-label="Stop">×</button>
+</div>
+
+<script>
+  // Enhanced TTS using z-ai-web-dev-sdk backend API
+  const voiceSelect = document.getElementById('voice-select') as HTMLSelectElement;
+  const statusEl = document.getElementById('voice-status') as HTMLElement;
+  const playBtn = document.getElementById('voice-play') as HTMLButtonElement;
+  const stopBtn = document.getElementById('voice-stop') as HTMLButtonElement;
+  const rateSel = document.getElementById('voice-rate') as HTMLSelectElement;
+  const player = document.getElementById('voice-player') as HTMLElement;
+
+  let playing = false;
+  let currentText = '';
+
+  // Load available voices from API
+  async function loadVoices() {
+    try {
+      const res = await fetch('/api/tts');
+      const data = await res.json();
+      voiceSelect.innerHTML = '';
+      data.voices.forEach((v: string) => {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = v;
+        voiceSelect.appendChild(o);
+      });
+      const saved = localStorage.getItem('unifiedbook-voice');
+      if (saved && data.voices.includes(saved)) voiceSelect.value = saved;
+    } catch {
+      voiceSelect.innerHTML = '<option>tongtong</option>';
+    }
+  }
+  loadVoices();
+
+  voiceSelect.addEventListener('change', () => {
+    localStorage.setItem('unifiedbook-voice', voiceSelect.value);
+  });
+
+  playBtn.addEventListener('click', async () => {
+    currentText = player.getAttribute('data-text') || '';
+    if (!currentText) { statusEl.textContent = 'No text to read'; return; }
+
+    if (playing) {
+      // Pause via API
+      playing = false;
+      statusEl.textContent = 'Paused';
+      playBtn.querySelector('#voice-icon-play')!.style.display = '';
+      playBtn.querySelector('#voice-icon-pause')!.style.display = 'none';
+      return;
+    }
+
+    try {
+      statusEl.textContent = 'Generating audio...';
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: currentText,
+          voice: voiceSelect.value,
+          speed: parseFloat(rateSel.value),
+          format: 'wav'
+        })
+      });
+
+      if (!res.ok) { statusEl.textContent = 'Error generating audio'; return; }
+
+      const audioBuffer = await res.arrayBuffer();
+      const audio = new Audio();
+      audio.src = URL.createObjectURL(new Blob([audioBuffer], { type: 'audio/wav' }));
+
+      audio.onplay = () => {
+        playing = true;
+        playBtn.querySelector('#voice-icon-play')!.style.display = 'none';
+        playBtn.querySelector('#voice-icon-pause')!.style.display = '';
+        statusEl.textContent = 'Playing...';
+      };
+
+      audio.onended = () => {
+        playing = false;
+        statusEl.textContent = 'Finished';
+        playBtn.querySelector('#voice-icon-play')!.style.display = '';
+        playBtn.querySelector('#voice-icon-pause')!.style.display = 'none';
+      };
+
+      audio.onerror = () => {
+        playing = false;
+        statusEl.textContent = 'Playback error';
+      };
+
+      audio.play();
+    } catch (e) {
+      statusEl.textContent = 'Error: ' + (e as Error).message;
+    }
+  });
+
+  stopBtn.addEventListener('click', () => {
+    playing = false;
+    statusEl.textContent = 'Stopped';
+    playBtn.querySelector('#voice-icon-play')!.style.display = '';
+    playBtn.querySelector('#voice-icon-pause')!.style.display = 'none';
+  });
+</script>
+
+<style>
+  .voice-player {
+    position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%) translateY(140%);
+    z-index: 70; display: flex; align-items: center; gap: 0.8rem;
+    width: min(94vw, 46rem); padding: 0.7rem 1rem; border-radius: 14px;
+    border: 1px solid var(--rule); background: color-mix(in srgb, var(--bg-2) 96%, transparent);
+    backdrop-filter: blur(10px); box-shadow: 0 10px 34px var(--shadow);
+    transition: transform 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+  }
+  .voice-player.open { transform: translateX(-50%) translateY(0); }
+  .lb-play {
+    flex: none; width: 2.7rem; height: 2.7rem; border-radius: 50%;
+    background: var(--accent); color: #f8f2e2; display: grid; place-items: center;
+    transition: transform 0.15s;
+  }
+  .lb-play:hover { transform: scale(1.07); }
+  .lb-play svg { width: 1.05rem; height: 1.05rem; fill: currentColor; }
+  .voice-info { flex: 1; min-width: 0; }
+  .voice-status { font-family: var(--serif-display); font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .voice-info select { font-family: var(--serif-display); font-size: 0.8rem; color: var(--ink); background: var(--bg-3); border: 1px solid var(--rule-soft); border-radius: 6px; padding: 0.14rem 0.3rem; max-width: 11rem; }
+  .lb-close { flex: none; width: 1.9rem; height: 1.9rem; border-radius: 50%; display: grid; place-items: center; color: var(--ink-3); font-size: 1.1rem; line-height: 1; cursor: pointer; }
+  .lb-close:hover { color: var(--accent); background: var(--bg-3); }
+</style>

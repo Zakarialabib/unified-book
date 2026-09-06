@@ -1,0 +1,58 @@
+---
+import { getCollection } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import ChapterLayout from '../../layouts/ChapterLayout.astro';
+import InteractiveDemo from '../../components/InteractiveDemo.svelte';
+
+export async function getStaticPaths() {
+  const collections = ['astro', 'svelte', 'rust'] as const;
+  const paths = [];
+  for (const coll of collections) {
+    const entries = await getCollection(coll);
+    for (const entry of entries) {
+      paths.push({ params: { slug: entry.id } });
+    }
+  }
+  return paths;
+}
+
+const slug = Astro.params?.slug || '';
+const allCollections = ['astro', 'svelte', 'rust'] as const;
+const allChapters = await Promise.all(allCollections.map((c) => getCollection(c)));
+const allFlat = allCollections.flatMap((coll, i) => allChapters[i].map((e) => ({ ...e, _coll: coll })));
+const entry = allFlat.find((e) => e.id === slug);
+if (!entry) throw new Error(`Chapter ${slug} not found`);
+const collection = entry._coll || 'astro';
+
+const sorted = allFlat.sort((a, b) => a.data.order - b.data.order);
+const total = sorted.length;
+const idx = sorted.findIndex((e) => e.id === slug);
+const prev = idx > 0 ? sorted[idx - 1] : null;
+const next = idx < total - 1 ? sorted[idx + 1] : null;
+
+const words = (entry.body ?? '').split(/\s+/).filter(Boolean).length;
+const minutes = Math.max(1, Math.round(words / 210));
+
+const headings = (entry.body ?? '').match(/^#{2,3}\s+.+/gm) || [];
+const parsedHeadings = headings.map((h) => {
+  const depth = h.startsWith('###') ? 3 : 2;
+  const text = h.replace(/^#{2,3}\s+/, '');
+  const s = text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  return { depth, slug: s, text };
+});
+---
+
+<ChapterLayout
+  entry={entry}
+  index={idx + 1}
+  total={total}
+  prev={prev}
+  next={next}
+  minutes={minutes}
+  words={words}
+  headings={parsedHeadings}
+>
+  <!-- Svelte Interactive Island -->
+  <InteractiveDemo collection={collection} slug={slug} />
+  <slot />
+</ChapterLayout>

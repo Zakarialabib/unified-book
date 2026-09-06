@@ -1,0 +1,158 @@
+---
+order: 5
+title: "Effects & Lifecycle"
+subtitle: "$effect, onMount, and cleanup without leaks"
+description: "Effects run after the DOM updates and clean up after themselves — when you need them, and only then. Where effects belong, where they don't, and the lifecycle of a component from mount to unmount."
+level: "Intermediate"
+---
+
+Chapters 2 through 4 covered values flowing into the UI. Some work, though, has to flow *outward*: setting the document title, drawing on a canvas, logging an analytics event, opening a socket. The `$effect` rune is the bridge from reactive state to the imperative world, and like any bridge it is best crossed on purpose. This chapter covers how effects run, how they clean up after themselves, where they do not belong, and how a component's whole life — mount, update, destroy — fits together.
+
+## What an effect is for
+
+An effect is a function that runs *after* the DOM has been updated, automatically re-runs when the reactive values it reads change, and cleans up after itself. That is the whole definition. The reason effects exist is asymmetry: your components are reactive, but most of the platform is not. The `document.title` is a string, a canvas context is a blob of imperative calls, an analytics endpoint is a side door out of your app. Something must re-run imperative code when state changes — and something must stop re-running it when the component that cares is gone.
+
+The word *after* carries more weight than it seems. Because effects run once the DOM is settled, they are the correct place for code that must see the final rendered result — measuring an element, syncing a third-party widget, scrolling a list into view. Effects never run during server-side rendering, since there is no DOM to be after; they are browser-only by construction, which quietly removes a class of `typeof window` guards from your code.
+
+## $effect: timing and dependencies
+
+```svelte
+<script>
+  let count = $state(0);
+
+  $effect(() => {
+    document.title = `count is ${count}`;
+  });
+</script>
+
+<button onclick={() => count++}>increment</button>
+```
+
+The effect reads `count`, so `count` is its dependency. The compiler does not need you to say so: tracking works the way Chapter 2 described — whatever the effect *synchronously reads* while running becomes something it subscribes to. When `count` changes, the effect re-runs after the DOM updates, batched with any other pending work. Three consequences are worth internalizing. Dependencies are discovered from actual reads, so there are no dependency arrays to keep honest, and no stale ones to mislead you. Asynchronous reads — a value read after an `await` — are *not* tracked, which is usually what you want for one-shot work. And because the effect runs after render, reading layout from it is safe in a way that mid-render reads are not.
+
+## Cleanup functions
+
+An effect can return a function, which runs before the effect re-runs and once more when its owner is destroyed. This is Rust's `Drop` wearing JavaScript: cleanup is attached to the thing that acquired the resource, not sprinkled at call sites.
+
+```svelte
+<script>
+  let query = $state('');
+
+  $effect(() => {
+    const controller = new AbortController();
+    fetch(`/api/suggest?q=${query}`, { signal: controller.signal });
+
+    return () => controller.abort();
+  });
+</script>
+
+<input bind:value={query} placeholder="type to search" />
+```
+
+Every keystroke changes `query`, the effect re-runs, and *before* it does, the previous run's cleanup aborts the in-flight request. The ordering guarantee — old cleanup, then new effect — means each run starts from a clean slate, and the final cleanup runs on destroy, so nothing outlives the component that started it. Timers, event listeners, subscriptions, and sockets all follow the same shape: acquire inside the effect, release in the returned function. If you find cleanup logic living anywhere else, that is usually the bug.
+
+## Where effects don't belong
+
+The most common effect bug in every signals-based framework is using an effect to compute state. It usually arrives as muscle memory from other libraries:
+
+```svelte
+<script>
+  let count = $state(0);
+
+  // the reflex: mirror state through an effect
+  let doubled = $state(0);
+  $effect(() => {
+    doubled = count * 2;
+  });
+</script>
+```
+
+This works, in the way that shipping without tests works. It costs an extra render pass — `doubled` changes *after* the DOM updates, then triggers another update cycle. It hides the data flow: nothing about `doubled`'s declaration says where its value comes from. And it invites accidental loops, since effects both read and write state. The fix is Chapter 2's rune, applied with intent:
+
+```svelte
+<script>
+  let count = $state(0);
+  let doubled = $derived(count * 2);
+</script>
+```
+
+`$derived` computes lazily, caches, and participates in the same render pass as everything else — no second cycle, and the dependency is declared at the site of the value. The rule of thumb that follows: **state changes should be computed with `$derived`; effects are for the world outside the reactive graph.** If an effect's only output is another piece of state, it is a derived wearing a trench coat, and the compiler will be happier when you arrest it.
+
+## $effect.pre and untrack
+
+Two modifiers refine the default timing. `$effect.pre` runs *before* the DOM updates — in the same window where Svelte itself computes what changed — which is the right moment to measure or record the current layout before Svelte moves anything:
+
+```svelte
+<script>
+  let list = $state([]);
+  let lastHeight = 0;
+
+  $effect.pre(() => {
+    lastHeight = document.body.scrollHeight;
+  });
+</script>
+```
+
+`untrack`, from the `svelte` module, is the opposite adjustment: it reads reactive values *without* subscribing, for the reads you do not want to trigger re-runs:
+
+```svelte
+<script>
+  import { untrack } from 'svelte';
+
+  let log = $state([]);
+
+  $effect(() => {
+    console.log(`log has ${log.length} entries`);
+    const previous = untrack(() => log[log.length - 2]);
+    console.log(`previous entry: ${previous}`);
+  });
+</script>
+```
+
+The effect re-runs when `log.length` changes, but not when the entry at `length - 2` happens to change on its own — the `untrack` read is deliberate, not accidental. Use it sparingly and locally: a whole effect wrapped in `untrack` is usually an effect that should not exist.
+
+## onMount, and when you still need it
+
+`onMount` registers a function that runs exactly once, after the component's first render:
+
+```svelte
+<script>
+  import { onMount } from 'svelte';
+
+  let rows = $state([]);
+
+  onMount(async () => {
+    const res = await fetch('/api/rows');
+    rows = await res.json();
+  });
+</script>
+```
+
+It returns a cleanup function of its own, and — like effects — it never runs on the server. The distinction from `$effect` is re-run semantics: `onMount` runs once; `$effect` re-runs with its dependencies. That makes `onMount` the natural home for one-time setup that *reads nothing* or should never repeat — fetching initial data, instantiating a heavy library, wiring a listener that lives for the component's whole life. In SvelteKit, though, data fetching at mount is usually the wrong layer entirely: Chapter 8's `load` functions fetch before the component renders, on the server where possible. Keep `onMount` for genuinely client-only initialization, and it serves faithfully.
+
+## The lifecycle of a component
+
+Putting the pieces together, a component's life is: init — where `$props`, `$state`, and `$derived` are set up and effects are scheduled — then *mount*, where the DOM exists, `onMount` callbacks and then effects run; then a repeat cycle of *state change, DOM update, effect cleanup, effect re-run*; and finally *destroy*, where cleanups run in reverse order and the DOM is released. The framework guarantees the pairs: every listener acquired has its removal scheduled, every subscription has its unsubscribe, in code you write adjacent to the acquisition.
+
+One last tool for completeness: `$effect.root` creates effects *outside* a component's initialization, returning a function that disposes them. It is the escape hatch for libraries, tests, and module-level code that needs reactive consumers with a manual off switch — most of the time you will never call it, but knowing it exists explains how runes can drive state outside `.svelte` files at all, which is precisely where Chapter 6 takes the story.
+
+```js
+// anywhere: effects with a manual off switch
+import { $effect } from 'svelte';
+
+const dispose = $effect.root(() => {
+  $effect(() => console.log(theme.mode));
+});
+
+// later: dispose();
+```
+
+## Key takeaways
+
+- `$effect` runs after DOM updates, auto-tracks the reactive values it synchronously reads, and never runs during server rendering.
+- Return a cleanup function to release resources — it runs before each re-run and on destroy, pairing every acquisition with a release.
+- Computing state in an effect is the classic misuse; if the output is state, the answer is `$derived`, and the extra render pass is the symptom.
+- `$effect.pre` reads layout before Svelte updates the DOM; `untrack` reads without subscribing when a dependency would cause unwanted re-runs.
+- `onMount` is for one-time, non-repeating setup — and in SvelteKit, initial data belongs in `load` instead; `$effect.root` extends effects beyond components.
+
+Effects connect your state to the outside world. Next, we leave the component entirely: state that is shared, and the discipline that keeps it sane.

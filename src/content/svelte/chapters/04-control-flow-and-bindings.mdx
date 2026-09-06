@@ -1,0 +1,178 @@
+---
+order: 4
+title: "Control Flow & Bindings"
+subtitle: "{#if}, {#each}, and two-way wiring"
+description: "Template blocks that compile to tight imperative code — conditionals, keyed lists, and await — plus bind: for two-way binding on inputs, components, and media elements."
+level: "Foundations"
+---
+
+You have components, state, and props. What remains before you can build interfaces is template syntax: how a view decides what to show, how it renders collections, and how it keeps inputs and state in sync. Svelte's answer is a small set of *blocks* — `{#if}`, `{#each}`, `{#await}`, `{#key}` — and the `bind:` directive. Like everything else in this book, none of it survives to the browser as an interpreter: blocks compile down to plain conditionals and loops operating on the DOM.
+
+## Templates that compile
+
+Svelte's template syntax is worth approaching the way Chapter 1 approached the compiler: as instructions to a code generator, not API calls. When you write an `{#if}` block, the compiler emits an actual `if` statement; when you write `{#each}`, it emits a loop that creates, moves, and removes the nodes each item owns. There is no virtual DOM diffing these decisions after the fact, which is why Svelte templates stay fast without memoization rituals.
+
+The blocks also keep templates honest about structure. Every block opens with `#`, continues with `:`, and closes with `/` — `{#if}`, `{:else}`, `{/if}` — so the shape of the control flow is visible at a glance in the markup, the same way Rust's `match` arms make branching impossible to misread. We will cover conditionals, lists, and await here, and leave transitions — motion attached to these same blocks — for Chapter 7.
+
+## Conditionals with if and else
+
+The `{#if}` block renders its contents only while a condition holds, with optional `{:else if}` chains and a final `{:else}`:
+
+```svelte
+<script>
+  let count = $state(0);
+</script>
+
+{#if count === 0}
+  <p class="hint">go on, click it</p>
+{:else if count > 10}
+  <p class="warn">that is a lot of clicks</p>
+{:else}
+  <p>clicked {count} times</p>
+{/if}
+```
+
+The important semantic: an `{#if}` block *creates and destroys* its contents — it does not toggle a `display: none`. When the condition flips, the old branch's elements are removed from the DOM and the new branch's are built, running any cleanups and transitions on the way. That is usually what you want, because state that only matters in one branch is not kept alive behind the scenes. When you do want elements to stay mounted but hidden, that is a CSS decision, and an explicit one: put the class on the element yourself.
+
+## Lists, keys, and each
+
+The `{#each}` block renders a collection, and the *key* in parentheses tells the compiler how to tell items apart:
+
+```svelte
+<script>
+  let todos = $state([
+    { id: 1, title: 'outline chapter', done: true },
+    { id: 2, title: 'write prose', done: false }
+  ]);
+</script>
+
+<ul>
+  {#each todos as todo, index (todo.id)}
+    <li class:done={todo.done}>
+      {index + 1}. {todo.title}
+    </li>
+  {:else}
+    <li>nothing to do</li>
+  {/each}
+</ul>
+```
+
+The key `(todo.id)` is an identity claim: when the array reorders or an item is removed in the middle, the compiler moves and patches the existing DOM nodes instead of rebuilding from indexes. Without a key, `{#each}` falls back to index-based matching, which silently scrambles per-item state — input values, transitions, local component state — whenever the array shifts. Key by a stable id, never by index, the same rule as every other framework's list rendering. The `{:else}` branch renders when the list is empty, `index` is optional, and you can destructure inline: `{#each todos as { title, done } (title)}`.
+
+## Await and key blocks
+
+The `{#await}` block renders the three states of a promise as first-class template syntax:
+
+```svelte
+<script>
+  import { getReport } from './api';
+  let reportPromise = $state();
+</script>
+
+{#await reportPromise}
+  <p>loading report…</p>
+{:then report}
+  <Report data={report} />
+{:catch error}
+  <p class="error">{error.message}</p>
+{/await}
+```
+
+Each state gets its own markup, the latest promise wins if the value changes mid-flight, and there is no loading flag to forget. It pairs naturally with SvelteKit's `load` functions in Chapter 8, where data usually arrives before the component renders — but for client-side fetches triggered by user action, `{#await}` keeps the states honest. Its sibling `{#key expression}` destroys and recreates its contents whenever the expression changes — useful to reset a component's internal state, restart a transition, or re-run an entrance animation when an id changes:
+
+```svelte
+{#key userId}
+  <Avatar userId={userId} />
+{/key}
+```
+
+## bind:value and friends
+
+Forms are where one-way data flow turns into ceremony, so Svelte makes two-way wiring a directive: `bind:value` keeps an input and a `$state` variable in sync, in both directions, without you writing the update handler.
+
+```svelte
+<script>
+  let email = $state('');
+  let flavor = $state('vanilla');
+  let extras = $state([]);
+</script>
+
+<input type="email" bind:value={email} />
+
+<select bind:value={flavor}>
+  <option>vanilla</option>
+  <option>chocolate</option>
+</select>
+
+{#each ['sprinkles', 'fudge'] as extra}
+  <label>
+    <input type="checkbox" bind:group={extras} value={extra} /> {extra}
+  </label>
+{/each}
+```
+
+The directive is type-aware: inputs of type `number` and `range` coerce to real numbers, checkboxes pair with `bind:checked`, and `bind:group` collects the checked values of a radio or checkbox set into one array. Underneath, the compiler writes exactly the `input` and `change` listeners you would have written — which is to say, `bind:` is not magic, it is generated plumbing, and it composes with the reactivity from Chapter 2: assigning to the bound variable updates the input, and typing updates the variable.
+
+## Binding components with $bindable
+
+Props flow down by default, and Chapter 3 argued that is a virtue. Sometimes, though, a component wants to offer the same two-way ergonomics as an input. The `$bindable` rune opts a prop in:
+
+```svelte
+<!-- Volume.svelte -->
+<script>
+  let { value = $bindable(50) } = $props();
+</script>
+
+<input type="range" bind:value={value} />
+```
+
+```svelte
+<!-- App.svelte -->
+<script>
+  import Volume from './Volume.svelte';
+  let volume = $state(80);
+</script>
+
+<Volume bind:value={volume} />
+<p>{volume}%</p>
+```
+
+Inside `Volume`, `value` is an ordinary mutable prop — assigning it notifies whoever bound to it. The `$bindable(50)` default applies when the parent passes nothing and does not bind. The discipline worth keeping: reach for `bind:` on components for form-like state where the two-way reading is the truth, and prefer callback props from Chapter 3 for events that *mean* something — submitting, confirming, deleting. Bindings say "this is shared state"; callbacks say "this happened."
+
+## Media and element bindings
+
+The `bind:` family extends past forms to elements themselves. Media elements expose playback state, and elements expose geometry:
+
+```svelte
+<script>
+  let player = $state();
+  let time = $state(0);
+  let duration = $state(0);
+  let paused = $state(true);
+</script>
+
+<video
+  bind:this={player}
+  bind:currentTime={time}
+  bind:duration={duration}
+  bind:paused={paused}
+  src="/standup.mp4"
+></video>
+
+<button onclick={() => (paused = !paused)}>
+  {paused ? 'play' : 'pause'}
+</button>
+<p>{time.toFixed(1)}s of {duration.toFixed(1)}s</p>
+```
+
+`bind:this` captures the element itself into a variable — the escape hatch for calling DOM APIs directly, which we will use in Chapter 5 for canvas and focus management. `bind:currentTime`, `bind:paused`, and friends are live, writable views of the element's state, so setting `paused` really plays or pauses the video. Read-only bindings like `bind:clientWidth` and `bind:offsetHeight` publish an element's measured geometry as reactive values, which replaces a whole category of resize-observer boilerplate. As always, the compiler wrote the listeners; you wrote the intent.
+
+## Key takeaways
+
+- Template blocks compile to real conditionals and loops — there is no runtime interpretation of `{#if}` or `{#each}`.
+- `{#if}` creates and destroys DOM rather than hiding it; keep that in mind when state should or should not survive a branch flip.
+- Key your `{#each}` blocks by stable id, or per-item state scrambles when the array reorders; `{:else}` handles the empty case.
+- `bind:value`, `bind:group`, and `bind:checked` are two-way wiring for forms; `$bindable` opts a component prop into the same ergonomics.
+- `bind:this` captures elements for direct DOM access, media bindings publish playback state, and geometry bindings replace resize-observer boilerplate.
+
+One warning stays from this chapter: state you can write from two directions needs discipline about *when* work happens in response. That is effects — the next chapter.

@@ -1,0 +1,165 @@
+---
+order: 1
+title: "Memory & Ownership"
+subtitle: "the stack, the heap, and who cleans up"
+description: "Every value in Rust has exactly one owner, and when the owner goes, the value goes with it. This single rule replaces garbage collection and manual free — and it changes how you design everything."
+level: "Foundations"
+---
+
+Every language has to answer the same question: when a value is created on the heap, who is responsible for releasing it? C answers "you, the programmer" — which is fast, and which has produced four decades of use-after-free bugs. Java and Go answer "the runtime" — which is safe, and which costs you a garbage collector, its pauses, and its memory overhead. Rust gives a third answer: **the compiler proves, at compile time, that every value has exactly one owner, and inserts the cleanup code for you.**
+
+That answer is called *ownership*, and it is not one feature among many. It is the load-bearing wall of the entire language. Memory safety, the borrow checker, fearless concurrency, even why `String` behaves differently from `&str` — all of it falls out of this one idea. This chapter builds the mental model carefully, because everything after it assumes you have it.
+
+## Why ownership exists
+
+Think about what a garbage-collected runtime actually does. It lets you create references freely, share them freely, and stop thinking about them. The price is a runtime component that periodically walks your memory, figures out what is still reachable, and reclaims the rest. That bookkeeping is invisible in a small service and very visible in a latency-sensitive one: GC pauses, cache pressure from extra metadata, and a fleet of servers sized for the collector's headroom rather than your workload.
+
+Manual memory management is the opposite trade. You get deterministic cleanup and full control, but the compiler trusts you completely. Off-by-one free, double free, returning a pointer to a stack frame that no longer exists — all of these compile in C and explode in production, sometimes months later, in a code path nobody has touched.
+
+Rust refuses both compromises. The rule it enforces is small enough to write on an index card:
+
+> Each value in Rust has a single **owner**. When the owner goes out of scope, the value is **dropped**. Moving or borrowing is the only way to access a value otherwise.
+
+The compiler enforces that card statically. There is no garbage collector, and there is no manual `free`. Cleanup is deterministic — it happens at a precise, predictable moment, the instant a binding goes out of scope — and it happens even if that scope is exited early by a `return`, a `?`, or a panic unwinding.
+
+## The stack and the heap
+
+To understand moves, you need to be precise about where data lives. The **stack** is a LIFO region of memory tied to the call structure of your program. Pushing a stack frame is a pointer bump; popping one is a pointer bump back. Values with a known, fixed size — integers, booleans, floats, characters, fixed-size arrays, pointers themselves — live there. Access is nearly free because the address is computable from the frame pointer.
+
+The **heap** is for everything whose size is not known at compile time, or that must outlive the current call. Allocation is a real operation: the allocator finds a free region, records it, and hands you an address. In Rust you rarely touch the allocator directly; instead, smart types like `String`, `Vec<T>`, and `Box<T>` own a heap buffer on your behalf.
+
+Consider the difference between the two string types, because the distinction will follow you for the rest of your Rust life:
+
+```rust
+let n: i32 = 42;              // known size: lives on the stack
+let s = String::from("book"); // heap-backed: lives on the heap
+```
+
+A `String` is a small struct of three machine words — a pointer to a heap buffer, a length, and a capacity. That triple lives on the stack; the characters `"book"` live on the heap. So when people say "a `String` is on the heap," the honest version is: *the buffer is on the heap, the handle to it is on the stack.* This picture — a small handle on the stack pointing at a buffer on the heap — is exactly what a *move* manipulates.
+
+## Move semantics
+
+Here is the sentence that surprises everyone coming from other languages: **assignment moves ownership in Rust; it does not copy.**
+
+```rust
+let s1 = String::from("book");
+let s2 = s1; // ownership of the heap buffer moves to s2
+
+// println!("{s1}");        // compile error: s1 no longer owns anything
+println!("{s2}");
+```
+
+Under the hood, nothing was duplicated. The stack triple (pointer, length, capacity) was bitwise-copied from `s1`'s slot into `s2`'s slot, and then `s1` was marked invalid. Why invalidate it? Because when `s1` and `s2` go out of scope, Rust would otherwise insert two heap deallocations of the same buffer — a classic double free. Instead of tracking that with a runtime counter or collector, the compiler simply refuses to let two owners exist.
+
+Types that are cheap to bitwise-copy — all the integers, floats, booleans, characters, and tuples or arrays made only of those — are marked `Copy`. They never move; assignment duplicates them, and the original stays valid:
+
+```rust
+let x: i32 = 42;
+let y = x;      // i32 is Copy: a plain bitwise copy
+println!("{x} {y}"); // both fine
+```
+
+When you *do* want a deep copy of a heap-backed value, you ask for it explicitly, so the cost is visible in the code:
+
+```rust
+let s1 = String::from("book");
+let s2 = s1.clone(); // explicit deep copy of the heap buffer
+println!("{s1} {s2}"); // both valid
+```
+
+That dot is one of the most important characters in the language. Wherever you see `.clone()`, you know a real allocation is happening — Rust makes expensive operations syntactically loud so they can't hide in a plain `=`.
+
+## Ownership and functions
+
+Passing a value to a function follows the same rule as assignment: by default, the value **moves** into the parameter. The caller loses access; the callee is now the owner and is responsible for dropping it — unless it hands ownership back.
+
+```rust
+fn consume(s: String) {
+    println!("got {s}");
+} // s dropped here
+
+fn main() {
+    let s = String::from("payload");
+    consume(s);
+    // println!("{s}"); // error: s was moved into consume
+}
+```
+
+If a function needs to use a value and give it back, that's awkward but honest — and it is exactly the friction that motivates the next chapter. Returning values *out* of a function transfers ownership to the caller, which is why constructors like `String::from` work: the returned `String` is owned by whoever receives it.
+
+```rust
+fn make_greeting(name: &str) -> String {
+    format!("hello, {name}") // ownership moves to the caller
+}
+```
+
+A useful habit when reading Rust: track the *owner* of every heap value in a function. If a value flows into a call and you still need it afterward, you either need a borrow (next chapter) or a `.clone()`.
+
+## Drop, RAII, and deterministic cleanup
+
+When the owner of a value goes out of scope, Rust calls `drop` on it. For `String` that means freeing the buffer; for a `Vec` it means freeing its elements. You can observe the order with your own type:
+
+```rust
+struct Ticket(u32);
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        println!("releasing ticket {}", self.0);
+    }
+}
+
+fn main() {
+    let _a = Ticket(1);
+    let _b = Ticket(2);
+    println!("scope ending");
+} // prints: scope ending, releasing ticket 2, releasing ticket 1
+```
+
+This pattern has a name older than Rust: **RAII** — resource acquisition is initialization, and cleanup is destruction. The power of it goes far beyond memory. A `File` closes its descriptor on drop. A `MutexGuard` releases the lock on drop. A socket, a thread handle's join state, a database connection wrapped in a pool guard — all of them release their resources in exactly one place: when their owner leaves scope. You cannot forget to call `close()` in Rust, because there is no `close()` to forget; there is only the end of the scope.
+
+Contrast this with `try`/`finally` or `defer` discipline in other languages: in Rust the cleanup is attached to the *type*, not to each call site. Write the type once, and every future use of it is automatically exception-safe and early-return-safe.
+
+One more nuance: `drop(value)` as a function is not callable directly — if it were, the value would be dropped twice. The standard library provides `std::mem::drop(value)` instead, which consumes the value immediately and ends its life right there. It is the idiomatic way to say "release this now, not at the end of the block."
+
+## Box and putting values on the heap
+
+The simplest heap-owning type is `Box<T>` — a single value on the heap with its handle on the stack. It has no refcounting, no locking, no runtime: it is a pointer with exactly one owner, and the compiler enforces that.
+
+```rust
+let b = Box::new(42);
+println!("b = {b}"); // dereferences automatically when printed
+```
+
+Boxes show up in three everyday situations. First, **recursive types**, where a value can contain itself indirectly and therefore must live behind a pointer so its size stays finite:
+
+```rust
+enum List {
+    Cons(i32, Box<List>),
+    Nil,
+}
+```
+
+Second, **trait objects** like `Box<dyn Error>` or `Box<dyn Draw>` — a pointer to "some type that implements this trait," with the concrete type erased; chapter 3 covers the mechanics. Third, **moving big values around cheaply**: moving a `Box` copies one machine word, not the payload.
+
+The rest of the heap ecosystem builds on the same ownership idea: `Rc<T>` adds a *runtime* reference count for shared read-only access (with the compiler refusing to let you mutate through it), and `Arc<T>` is the thread-safe version you'll meet in chapter 5. Rust never made sharing illegal — it made the cost of sharing explicit and the rules of sharing checkable.
+
+## Reading code with ownership in mind
+
+Ownership changes how you *design*, not just how you compile. A few habits that pay off immediately:
+
+- **Return owned values from constructors and builders.** The caller gets a self-contained value with no strings attached to your internals.
+- **Take borrows as parameters whenever you don't need to keep the value** (`&str` instead of `String`); that keeps the caller's options open and avoids surprise moves.
+- **Clone deliberately, never accidentally.** A `.clone()` at a hot path is a performance review comment; a `.clone()` at a cold path is a perfectly reasonable readability purchase.
+- **Model resources as types with `Drop`.** If something must be released — a lock, a file, a transaction — wrap it so the release is structural.
+
+The compile errors you will hit this week are the borrow checker teaching you this model. "Value moved here" is not the compiler being difficult; it is the compiler telling you that your mental sketch had two owners for one buffer, and that one of them was about to be wrong.
+
+## Key takeaways
+
+- Every value has exactly one owner; when the owner leaves scope, the value is dropped — deterministically, with no garbage collector.
+- Assignment and by-value parameters *move* heap-owning values; `Copy` types duplicate instead, and `.clone()` is the explicit, visible deep copy.
+- `Drop` and RAII attach cleanup to types, so locks, files, and sockets release correctly on every path, including early returns and panics.
+- `Box<T>` puts one value on the heap; recursive types and trait objects are its everyday uses.
+- Design with ownership in mind: own what you create, borrow what you merely use, and let moves document the flow of responsibility.
+
+Next up is the natural follow-up question: if everything moves by default, how do you *use* a value without giving it away? That is borrowing — and the borrow checker is where Rust's reputation, good and bad, really begins.

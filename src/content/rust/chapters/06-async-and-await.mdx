@@ -1,0 +1,136 @@
+---
+order: 6
+title: "Async & Await"
+subtitle: "the same problem, smaller stacks"
+description: "Async is not 'threads but cheaper' — it is a different execution model where waiting is explicit and the compiler turns your functions into state machines. Here is what actually happens under .await, and how to build with tokio without blocking your runtime."
+level: "Concurrency"
+---
+
+Chapter 5's threads are real OS entities: each costs about eight kilobytes of stack, a scheduling context, and a kernel transition whenever it blocks. A server holding a thread per connection dies around a few thousand sockets — not because the CPU is busy, but because it is *waiting* on I/O with nothing else to do. Async exists to fix exactly that: it lets one or a few threads juggle tens of thousands of tasks by making "waiting" an explicit, schedulable state instead of a blocked thread.
+
+The mental correction to make first: **async is not about speed; it is about concurrency while waiting.** A CPU-bound program gains nothing from async — it may even lose. What async buys you is the ability to have enormous numbers of in-flight operations whose cost is a small state machine, not a thread.
+
+## What a Future actually is
+
+The core type is `Future`, and its definition is smaller than its reputation:
+
+```rust
+pub trait Future {
+    type Output;
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>;
+}
+
+pub enum Poll<T> {
+    Ready(T),
+    Pending,
+}
+```
+
+A future is a **lazy value describing work that may not be finished yet**. It does nothing when created. Someone repeatedly calls `poll`, and the future answers `Ready(value)` when done or `Pending` when not, registering a waker so the poller knows when to try again. When you write an `async fn`, the compiler rewrites it into an enum — one variant per `.await` point — that implements `Future`. Each `.await` becomes a state transition: save everything alive at that point, return `Pending`, and resume from exactly there when woken.
+
+That is why "async fn is syntax sugar for a state machine" is the accurate slogan, and why the borrow checker from chapter 2 still governs everything: locals held across an `.await` live inside the future's enum, so they behave like fields of a struct being driven by an executor.
+
+One crucial consequence of laziness: futures are inert until someone polls them. Unlike a JS promise, `let f = do_work();` runs *nothing*. Work starts when you `.await` it, spawn it, or hand it to a combinator.
+
+## The executor: tokio
+
+Who polls? That is the **executor** — the runtime, and the one part of this story Rust's standard library deliberately does not ship. In practice that means tokio: it owns a small pool of worker threads (typically one per core), multiplexes every spawned task across them, and integrates a timer and I/O driver so epoll/kqueue wakeups resume the right task.
+
+```rust
+use std::time::Duration;
+
+async fn fetch(name: &str) -> String {
+    tokio::time::sleep(Duration::from_millis(100)).await; // simulated I/O
+    format!("{name} done")
+}
+
+#[tokio::main]
+async fn main() {
+    // sequential: ~200ms total
+    let a = fetch("users").await;
+    let b = fetch("posts").await;
+
+    // concurrent: ~100ms total — both futures driven together
+    let (a, b) = tokio::join!(fetch("users"), fetch("posts"));
+
+    println!("{a} · {b}");
+}
+```
+
+Read `join!` carefully, because it is the shape of everyday async: both futures run *concurrently on one task*, interleaving at their await points — no spawning required. Spawning creates an independent task with its own lifetime:
+
+```rust
+#[tokio::main]
+async fn main() {
+    let handle = tokio::spawn(fetch("users")); // starts immediately
+
+    println!("other work runs while the task is in flight");
+    let result = handle.await.unwrap(); // JoinHandle, like thread::spawn
+    println!("{result}");
+}
+```
+
+The signature of `tokio::spawn` carries the contract — `F: Future + Send + 'static`. Two rules fall out that you will feel in real code: **what a spawned task owns must be owned** (or `Arc`-ed), because the task may outlive the function; and **it must be `Send`**, because the executor may migrate it between worker threads. A reference into your stack, or a non-`Send` type like `Rc`, will not compile into a spawned task — the same safety net as chapter 5, extended to state machines.
+
+## Composition: racing, timing, selecting
+
+The combinators are where async gets expressive. `tokio::join!` runs several operations to completion together. `tokio::select!` runs several and takes the **first** to finish, cancelling the rest — the primitive behind timeouts, heartbeats, and shutdown:
+
+```rust
+use tokio::time::{sleep, Duration};
+
+async fn slow_query() -> String {
+    sleep(Duration::from_secs(5)).await;
+    String::from("results")
+}
+
+#[tokio::main]
+async fn main() {
+    tokio::select! {
+        res = slow_query() => println!("got: {res}"),
+        _ = sleep(Duration::from_millis(300)) => {
+            println!("timed out — query cancelled");
+        }
+    }
+}
+```
+
+Cancellation deserves one careful sentence: when a `select!` branch loses, its future is simply dropped — and because `Drop` runs (chapter 1), cleanup is structural. But a drop can land *at any await point*, so code that must finish what it started (flushing a buffer, committing a transaction) should be written to tolerate interruption, or shielded with `tokio::spawn` so its lifetime is independent. Every async API you write is implicitly a cancellation surface; designing for that is part of the job, the same way designing for early return was in sync code.
+
+A note on granularity: `await` points are where a task yields. Between them, a future is a synchronous block from the executor's point of view. Long stretches of CPU work between awaits stall the worker thread exactly like blocking I/O would — chunk your work so it awaits regularly.
+
+## Blocking is the enemy
+
+Every rule in async reduces to one commandment: **do not block the executor.** A worker thread stuck in a sync call — `std::thread::sleep`, `std::fs` file reads, a CPU-heavy loop, `reqwest::blocking` — is a thread that cannot poll any of its thousands of tasks. With one worker per core, a couple of careless blocking calls can stall an entire service.
+
+The tools for the exceptions you cannot avoid:
+
+```rust
+// CPU-heavy or forced-sync work: move it off the async workers
+let result = tokio::task::spawn_blocking(move || {
+    expensive_hash(&big_buffer) // runs on a dedicated blocking pool
+})
+.await
+.unwrap();
+```
+
+`spawn_blocking` hands the job to a separate pool sized for blocking work; `tokio::task::block_in_place` converts the *current* worker temporarily (multi-threaded runtime only). The selection rule is symmetric with chapter 5: **I/O-bound and many concurrent operations → async. CPU-bound → threads or spawn_blocking.** Mixing is fine and normal; hiding blocking inside async is not.
+
+Two smaller traps worth naming. First, `std::sync::Mutex` across an `.await`: holding a guard across an await point both risks deadlock and (usually) makes your future non-`Send`. For short critical sections with no await inside, `std::sync::Mutex` is actually fine and fast; once you must hold a lock across awaits, switch to `tokio::sync::Mutex` deliberately. Second, recursion in async fns needs boxing (`Box::pin`) because the compiler must size the state machine — the `async_recursion` crate automates the workaround when you hit it.
+
+## Async traits and streams
+
+Two ecosystem notes to orient you. Since Rust 1.75, traits may declare `async fn` — but the built-in form has a wrinkle: it is not automatically object-safe (`dyn`) and the returned future is not guaranteed `Send`, which spawned tasks require. The mature ecosystem answers remain the **`async_trait`** macro (boxes the future for you, dyn-friendly) or returning `impl Future + Send` explicitly. When you see `#[async_trait]` in real codebases, that is what it is for.
+
+When you need *many* values over time rather than one — a websocket, a watch stream, an event bus — the `Stream` trait is the async `Iterator`, and `while let Some(item) = stream.next().await` is its loop. Streams live in the `futures`/`tokio-stream` crates, not `std`, but they complete the picture: futures are one value later; streams are a sequence, item by await.
+
+## Key takeaways
+
+- Futures are lazy state machines: nothing runs until awaited, spawned, or combined; `.await` is a yield point the compiler compiles into state transitions.
+- An executor (tokio) polls futures on a small thread pool sized to your cores — thousands of cheap tasks, each a enum, not a thread.
+- `tokio::join!` runs futures concurrently on one task; `tokio::spawn` creates independent tasks that must be `Send + 'static` — ownership and thread-safety rules carry over intact.
+- `select!` gives you first-wins racing and timeouts, with cancellation as structured drops — design for interruption at await points.
+- Never block the executor: `spawn_blocking` for CPU work and forced-sync calls; `tokio::sync::Mutex` only when a lock genuinely spans an await.
+- Async is for *waiting*, not for computation — choose it for I/O concurrency, and choose threads (chapter 5) for CPU parallelism.
+
+You now have both halves of Rust's concurrency story. The next two chapters lift the safety net on purpose — first `unsafe`, the escape hatch and its contract, then FFI, where Rust meets the C world across the border.

@@ -1,0 +1,172 @@
+---
+order: 2
+title: "Projects & Routing"
+subtitle: "file-based routes, pages, and layouts"
+description: "Astro's router is your file tree. Pages, layouts, dynamic routes with getStaticPaths, redirects, and 404s — the structural skeleton every Astro project hangs on."
+level: "Foundations"
+---
+
+Astro's router is your file tree: a file in `src/pages` becomes a URL, a directory becomes a path segment, and square brackets become dynamic parameters. If you have used file-based routing in Next.js or SvelteKit, this is home turf — but Astro's version has fewer knobs, and the knobs it has are the ones that age well. That matters more than it sounds, because routing is the skeleton of a project: decisions made in the first hour outlive the component library, the styling approach, and usually the developer who made them. This chapter builds that skeleton — pages, layouts, dynamic routes — and then works the edges where mistakes get expensive: catch-alls, 404s, and redirects.
+
+## The project skeleton
+
+`npm create astro@latest` gives you a tree with strong opinions baked in, and it is worth internalizing what each directory is *for* before you fight it:
+
+```text
+my-site/
+├── astro.config.mjs      → integrations, adapters, build options
+├── public/               → copied verbatim: favicon, robots.txt, static fonts
+├── src/
+│   ├── assets/           → images processed by astro:assets (Chapter 7)
+│   ├── components/       → .astro components and framework islands
+│   ├── content/          → content collections: markdown and MDX (Chapter 4)
+│   ├── layouts/          → page shells: BaseLayout, PostLayout, DocsLayout
+│   ├── pages/            → the router lives here
+│   └── styles/           → global CSS
+└── package.json
+```
+
+The load-bearing distinction is `src` versus `public`. Everything in `src` is processed by Vite: imported, transformed, hashed, bundled. Everything in `public` is copied to the output byte-for-byte, no questions asked. The practical rule: if a file needs a build step or a stable hashed URL — fonts you will preload, images that get optimized — it belongs in `src`. If it must be reachable under exactly the name you gave it, like `public/favicon.svg`, it belongs in `public`. Almost every early confusion about "where does this file go" dissolves once you ask which of those two jobs it has.
+
+## Pages become routes
+
+Every file in `src/pages` maps to a URL by path, with the extension stripped and one special case: `index` means "the root of this directory."
+
+```text
+src/pages/index.astro          →  /
+src/pages/about.astro          →  /about
+src/pages/blog/index.astro     →  /blog
+src/pages/blog/first-post.md   →  /blog/first-post
+src/pages/docs/setup.mdx       →  /docs/setup
+```
+
+Markdown and MDX files are routes too, which is worth pausing on: a blog can literally be a folder of `.md` files with no dynamic route at all. A markdown page receives its own frontmatter as props and renders through a layout it names in that frontmatter — so for a handful of flat documents, the file *is* the site. The moment you want listing pages, sorting, or shared metadata rules, you graduate to content collections and a dynamic route, which is the Chapter 4 pattern we will use for the rest of the book. Keep pages themselves thin either way: a page's job is to say which layout renders here and where its content comes from, nothing more.
+
+## Layouts as the outer shell
+
+A layout is not a framework feature — it is a plain Astro component that wraps a `<slot />` and lives in `src/layouts` by convention. That convention is worth keeping, because it gives you a greppable answer to "where does the `<html>` tag live":
+
+```astro
+---
+// src/layouts/BaseLayout.astro
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = "A site built with Astro" } = Astro.props;
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+  </head>
+  <body>
+    <main><slot /></main>
+  </body>
+</html>
+```
+
+```astro
+---
+// src/pages/about.astro
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+<BaseLayout title="About">
+  <h1>About</h1>
+  <p>The page content lands in the slot.</p>
+</BaseLayout>
+```
+
+Everything global belongs here: the favicon, fonts, analytics, the client router when you adopt it in Chapter 8. The `Props` interface is doing real work — every page that forgets a required title fails the type check at build time, not as a missing tag in production. Slots, named slots, and the full composition model get their own chapter next; for now, notice only that the layout is just a component whose one special ability is having a hole in the middle.
+
+## Dynamic routes and getStaticPaths
+
+Most interesting routes are not one file per page; they are one file per *kind* of page. Square brackets make a route dynamic: `src/pages/blog/[slug].astro` matches `/blog/whatever`, and the file decides which slugs actually exist.
+
+```astro
+---
+// src/pages/blog/[slug].astro
+import { getCollection, render } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog");
+  return posts.map((post) => ({
+    params: { slug: post.id },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+---
+<BaseLayout title={post.data.title}>
+  <article><Content /></article>
+</BaseLayout>
+```
+
+`getStaticPaths` is the census. In static output every URL must exist at build time, so this function runs once per build and returns one route per object it produces: `params` fills in the bracket, `props` hands data to the page without a second query. If a blog post's frontmatter is broken or a fetch fails, the build fails — loudly, with the offending entry named. That is static generation's price and its gift: errors happen on your machine, before anything is deployed, instead of as a 500 on someone's phone. When a route truly cannot be known at build time, Chapter 6 shows the per-page escape hatch.
+
+## Rest params, 404s, and redirects
+
+Three edges round out the system. A *rest parameter* — `[...slug]` with three dots — matches any depth, which is how you build a catch-all for nested docs or a legacy URL sweeper:
+
+```astro
+---
+// src/pages/docs/[...path].astro
+export async function getStaticPaths() {
+  return [
+    { params: { path: "guides/install" } },
+    { params: { path: "guides/install/advanced" } },
+  ];
+}
+---
+```
+
+The 404 is not special either: a page named `404.astro` in `src/pages` is served by every major host whenever nothing else matches. Treat it as a real page, because lost visitors are real users:
+
+```astro
+---
+// src/pages/404.astro
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+<BaseLayout title="Page not found">
+  <h1>404</h1>
+  <p>That page moved or never existed. The <a href="/">home page</a> is a good start.</p>
+</BaseLayout>
+```
+
+Rest params are greedy and match anything, so put them last in their directory and let `getStaticPaths` decide what they actually resolve to; the built 404 is your safety net for everything the census did not name.
+
+## Routing decisions that age well
+
+Routing choices are cheap to make and expensive to reverse, because every decision leaks into URLs that other people have bookmarked. A few opinions from production. Keep one dynamic route per content type, and name params after what they carry — `[slug]` for a human-readable post, `[id]` only when the id genuinely is the identifier — because the bracket shows up in the URL forever. Prefer real redirects over JavaScript redirects: the config below issues actual HTTP redirects at the host level, which is the cheapest possible respect for inbound links and lets you reorganize content without breaking anyone.
+
+```js
+// astro.config.mjs
+import { defineConfig } from "astro/config";
+
+export default defineConfig({
+  trailingSlash: "never",
+  build: { format: "directory" },
+  redirects: {
+    "/twitter": "https://example.com/@yourhandle",
+    "/old-post": "/blog/renamed-post",
+  },
+});
+```
+
+Pick a trailing-slash setting and never think about it again — the default of `"ignore"` works, but an explicit choice prevents a future of duplicate-content debates. `build.format: "directory"` gives every page its own directory with an `index.html`, which hosts and CDNs handle most gracefully. And pass entry objects through `props` rather than re-fetching inside the page: the census already did the work once, and a route that quietly queries the world again for each page is where builds start to hurt. Chapter 4 builds on exactly this shape, with collections feeding `getStaticPaths` instead of ad-hoc file reads.
+
+## Key takeaways
+
+- The router is `src/pages`: files become URLs by path, `index` files become directory roots, and the `src` versus `public` split decides what gets processed versus copied.
+- Layouts are ordinary components with a `<slot />` in the middle, stored in `src/layouts` by convention, and they are the right home for every global concern.
+- `getStaticPaths` is a build-time census: `params` shape the URL, `props` carry the data, and a broken entry fails the build instead of production.
+- Rest params like `[...path]` match any depth for catch-alls, `404.astro` handles misses, and config-level redirects keep old URLs alive without JavaScript.
+- Routing decisions leak into permanent URLs, so name params honestly, fix trailing slashes once, and never make the page re-query what the census already fetched.
+
+The skeleton is in place, but routes are only half the story — the components that fill them have their own rules, and slots are the mechanism that makes them compose. That is next.

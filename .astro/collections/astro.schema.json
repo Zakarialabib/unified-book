@@ -1,0 +1,45 @@
+{
+  "$ref": "#/definitions/astro",
+  "definitions": {
+    "astro": {
+      "type": "object",
+      "properties": {
+        "order": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        },
+        "subtitle": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string",
+          "default": "Core"
+        },
+        "series": {
+          "type": "string",
+          "default": "The Astro Ecosystem"
+        },
+        "color": {
+          "type": "string",
+          "default": "#5628b4"
+        },
+        "$schema": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "order",
+        "title",
+        "subtitle",
+        "description"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

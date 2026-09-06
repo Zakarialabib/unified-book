@@ -1,0 +1,149 @@
+---
+order: 2
+title: "State & Runes"
+subtitle: "$state, $derived, and reactivity as language"
+description: "Runes are compiler keywords that make reactivity explicit: $state declares it, $derived computes it, and proxies keep objects and arrays reactive too. The mental model that everything else builds on."
+level: "Foundations"
+---
+
+Chapter 1 left you with the claim that Svelte compiles reactivity into your components. This chapter makes good on it. The goal is not API memorization — the runes fit on an index card — but a precise mental model of what happens when you declare, read, and write reactive values. Every later chapter assumes you have it: props, effects, bindings, and shared state are all this one machine wearing different hats.
+
+## The signal underneath
+
+Every modern frontend framework has converged on the same primitive, usually called a *signal*: a value paired with a list of whoever is currently reading it. When code reads the signal inside a reactive context — a render, a template, an effect — that reader is registered as a subscriber. When the value is written, the subscribers are notified and update themselves.
+
+```js
+// the primitive, stripped of polish: a value plus its readers
+function signal(value) {
+  const readers = new Set();
+  return {
+    get() {
+      return value; // a real implementation registers the reader here
+    },
+    set(next) {
+      value = next;
+      readers.forEach((read) => read()); // notify and let each rerun
+    }
+  };
+}
+```
+
+React hides this machinery inside hooks and the reconciler; Vue builds it from proxies; Svelte 5 compiles it directly into your code. When you write `let count = $state(0)`, the compiler turns `count` into a signal and routes every read and write through it. There is no store object to import and no subscription to manage — the variable *is* the reactive value. Hold that picture; the rest of the chapter is just its consequences.
+
+## $state: declaring what changes
+
+The `$state` rune declares a value that can change over time and whose changes the UI should follow:
+
+```svelte
+<script>
+  let count = $state(0);
+  let name = $state('Ada');
+
+  function increment() {
+    count += 1; // a write — every reader of count is notified
+  }
+</script>
+
+<button onclick={increment}>
+  {name} clicked {count} times
+</button>
+```
+
+Two habits worth forming immediately. First, `$state` is a compiler keyword, not an import — you never write `import { state } from 'svelte'`, because the rune exists to be rewritten at build time. Second, do not declare everything as state. Values that never change should stay plain `const`s; state is a promise that something varies and a price paid in tracking machinery. The discipline of declaring only what changes is what makes a Svelte codebase easy to read: the `$state` calls are a map of everything that can move.
+
+## Objects, arrays, and deep proxies
+
+When you hand `$state` an object or array, the compiler wraps it in a *deep proxy* — reads and writes on any nested property are tracked and trigger updates:
+
+```svelte
+<script>
+  let todo = $state({ title: 'write chapter', done: false });
+  let tags = $state(['svelte', 'runes']);
+
+  function finish() {
+    todo.done = true; // plain mutation — and it just works
+    tags.push('reactivity');
+  }
+</script>
+
+<p class:done={todo.done}>{todo.title}</p>
+<p>{tags.join(', ')}</p>
+```
+
+There is no immutability ceremony here. `todo.done = true` and `tags.push(...)` update the UI, because the proxy traps the mutation and notifies the readers. The wrapping is deep, so `state.user.address.city = 'Oslo'` is tracked too, and `Map` and `Set` are proxied with their methods intact. Two caveats keep you out of trouble: `$state.snapshot(todo)` returns a plain, non-proxied copy when you need one — for logging, `structuredClone`, or sending to a server — and the proxy is the reactive thing, which is exactly why the next and last sections matter.
+
+## $derived: state that computes itself
+
+Most state in an app is not independent; it is a function of other state. The `$derived` rune declares that relationship once, and the compiler maintains it forever:
+
+```svelte
+<script>
+  let count = $state(2);
+  let doubled = $derived(count * 2);
+  let quadrupled = $derived(doubled * 2);
+</script>
+
+<p>{count} doubled is {doubled}, quadrupled is {quadrupled}</p>
+```
+
+A derived value recalculates when the values it reads change, and only then — until a dependency changes, the previous result is cached and re-reads are free. Deriveds can depend on other deriveds, forming a dependency graph the compiler traces automatically; there are no dependency arrays to maintain and no stale-closure hazards, because tracking is based on what the expression actually reads at runtime. The habit that separates clean Svelte code from tangled Svelte code is reaching for `$derived` instead of a second `$state`: if a value can be *computed*, it should never be *stored*, because stored copies eventually disagree with their source.
+
+## $derived.by for multi-line logic
+
+`$derived` takes a single expression, and some computations do not fit in one. The `$derived.by` rune takes a function instead, which unlocks statements — guards, loops, early returns:
+
+```svelte
+<script>
+  let cart = $state([
+    { name: 'USB cable', price: 9 },
+    { name: 'keyboard', price: 79 }
+  ]);
+  let shipping = $state(5);
+
+  let total = $derived.by(() => {
+    const subtotal = cart.reduce((sum, item) => sum + item.price, 0);
+    return subtotal > 50 ? subtotal : subtotal + shipping;
+  });
+</script>
+
+<p>total: {total}</p>
+```
+
+The semantics are identical to `$derived`: dependencies are whatever the function reads, caching works the same, and the result is read-only — assigning to `total` is a compile-time error, which is the point. A good refactoring rhythm is to start with a `$derived` expression and graduate to `$derived.by` the moment you need a `reduce` or a conditional; if the function keeps growing past a screen, it usually wants to be a plain helper function that takes values as arguments, called from inside the rune.
+
+## Reassignment vs mutation
+
+Svelte's reactivity answers an old question — does updating this value notify the UI? — with a simple rule: writes through `$state` do, always. `count += 1`, `cart.push(item)`, and `todo.done = true` all trigger updates, because the compiler routes every write through the signal or proxy. Reassignment and mutation are equally valid styles; use whichever reads best.
+
+Two distinctions are still worth being precise about. For plain values — numbers, strings, booleans — reassignment is the only way to write, since there is nothing to mutate. For proxied containers, mutation is idiomatic and deep. And the old Svelte 4 workarounds are gone: there is no need for the `items = items` self-assignment trick to nudge the compiler, because runes-era reactivity tracks mutation directly. What has *not* changed is what "write" means at a distance — you cannot reassign someone else's `$state` binding across module boundaries, a constraint with real design consequences that Chapter 6 takes up when state moves out of components entirely.
+
+## Signals are not variables
+
+The model has one sharp edge, and it cuts people moving from other frameworks: a signal is a *binding*, not a value, so anything that severs the binding severs the reactivity. Destructuring is the classic case:
+
+```svelte
+<script>
+  let user = $state({ name: 'Ada', admin: false });
+
+  // wrong: name and admin are snapshots — they will never update
+  // let { name, admin } = user;
+
+  $effect(() => {
+    console.log(user.name); // reruns whenever name changes
+  });
+</script>
+
+<p>{user.name}</p>
+```
+
+The destructured `name` would be an ordinary string copied out of the proxy at that moment; changes to `user.name` would leave it stale. The fix is to read through the live object — in templates, in deriveds, in effects. The same logic explains why passing a `$state` value into a function passes the current value, why spreading an object into a new one loses tracking, and why the compiler's error messages will occasionally refuse to let you destructure reactive things. Reactivity lives in the reference; keep the reference and you keep the updates.
+
+## Key takeaways
+
+- `$state` is a compiler keyword that turns a variable into a signal — a value plus a subscriber list — so reads register and writes notify, with no subscription plumbing.
+- Objects and arrays become deep proxies: mutation is tracked at any depth, and `$state.snapshot` gives you the plain copy when you need one.
+- `$derived` (and `$derived.by` for multi-line logic) declares computed state with automatic dependency tracking and caching; prefer it over storing a second copy of anything computable.
+- Both reassignment and mutation trigger updates; the Svelte 4 tricks for coercing reactivity are obsolete.
+- Signals are bindings, not values — destructuring, spreading, or copying at the wrong moment freezes a snapshot, so read through the live reference.
+
+The next question is how values cross component boundaries: `$props`, and the snippets that make children composable.

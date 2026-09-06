@@ -1,0 +1,154 @@
+---
+order: 7
+title: "Transitions & Animations"
+subtitle: "motion as a first-class primitive"
+description: "transition:, in:, out:, animate:, spring, tweened — Svelte treats motion as a template primitive, not a library you bolt on. Fluid interfaces without a single animation library."
+level: "Intermediate"
+---
+
+Most interfaces animate through a side door: a library takes a DOM node, measures it, and fights your framework's rendering cycle for control of the element. Svelte refuses the side door. Because the compiler knows exactly when an element enters and leaves the DOM — the `{#if}` and `{#each}` blocks from Chapter 4 — motion can be a template directive, attached to the element it belongs to, compiled into code that runs at precisely the right moment. This chapter covers the directives, the built-in effects, and the two motion values that round out the toolkit.
+
+## Why transitions belong in the template
+
+The problem with imperative animation is not the animation — it is the *lifecycle mismatch*. A library you call on mount has no idea that Chapter 4's `{#if}` block is about to destroy its target node, or that a list re-render is about to reorder it. So you end up writing guards, timers, and cancellation code whose only job is to reconcile the animator with the renderer.
+
+Svelte deletes the mismatch by putting transitions where the lifecycle already lives. A directive like `transition:fade` tells the compiler: when this element enters the DOM, play this effect; when it leaves, play it out — and *defer the removal* until the exit finishes. Because the compiler generates the wiring, there is nothing to clean up, no node to capture with `bind:this`, and no orphaned animation. Most of the built-ins are expressed as CSS, so they run on the compositor and skip JavaScript frames entirely — motion that is declarative in the source and cheap at runtime.
+
+## The transition, in, and out directives
+
+`transition:` is the bidirectional form — the same effect plays forward on entry and in reverse on exit:
+
+```svelte
+<script>
+  import { fade } from 'svelte/transition';
+  let visible = $state(true);
+</script>
+
+<button onclick={() => (visible = !visible)}>toggle</button>
+
+{#if visible}
+  <p transition:fade>now you see me</p>
+{/if}
+```
+
+The element fades in when the block appears and fades out when it disappears — and while the exit plays, the element stays in the DOM, so removal waits for the fade. When entry and exit should look different, the directional forms take over: `in:` specifies the entrance effect, `out:` the exit one, and they accept different effects or different parameters. A toast, for instance, might arrive with `in:fly={{ y: 16 }}` and leave with `out:fade`. The directives attach to any element inside a block that creates or destroys it — `{#if}`, `{#each}`, `{#key}`, `{#await}` — which is to say: wherever Chapter 4's blocks fire, transitions can play.
+
+## The built-ins: fade, fly, blur, scale, slide
+
+The `svelte/transition` module ships five effects that cover most interfaces:
+
+```svelte
+<script>
+  import { fade, fly, blur, scale, slide } from 'svelte/transition';
+  let open = $state(true);
+</script>
+
+{#if open}
+  <div transition:fly={{ y: 16, duration: 200 }}>slides up while fading</div>
+  <div transition:scale={{ start: 0.96 }}>grows from almost-right size</div>
+  <div transition:blur={{ duration: 150 }}>unblurs into place</div>
+  <details transition:slide>accordion content, height animated</details>
+{/if}
+```
+
+Each earns its niche. `fade` is the workhorse for subtle presence changes. `fly` combines a fade with movement along an axis — toasts, dropdowns, anything entering from off-position. `scale` is the popover and dialog entrance. `blur` reads as "materializing" and pairs well with `fly`. `slide` animates height and margin, which makes it the honest choice for accordions and expanding rows — the DOM actually collapses, rather than being masked. All of them accept a parameter object, and all of them compose with the directional forms, so mixing `in:fly={{ y: 16 }}` with `out:fade` is a one-line art direction.
+
+## Parameters and custom transitions
+
+Every transition takes a parameters object as its value: `transition:fade={{ duration: 200 }}` runs the fade in 200 milliseconds. Common parameters include `duration`, `delay`, and `easing` — an easing function imported from `svelte/easing` that shapes the rate of change. When the built-ins run out, a transition is just a function:
+
+```svelte
+<script>
+  import { cubicOut } from 'svelte/easing';
+
+  function whoosh(node, params) {
+    return {
+      duration: params.duration ?? 300,
+      easing: cubicOut,
+      css: (t) => `opacity: ${t}; transform: translateX(${(1 - t) * 40}px)`
+    };
+  }
+</script>
+
+<p transition:whoosh={{ duration: 400 }}>custom, but CSS-driven</p>
+```
+
+The function receives the DOM node and the parameters from the template, and returns a descriptor. The `css` key is the important one: a function of `t`, from 0 to 1, returning style strings — and the compiler turns it into a real CSS keyframe animation, so the browser runs it on its own clock. If the effect genuinely cannot be expressed as styles, a `tick` function receives each intermediate `t` instead and manipulates the node in JavaScript, at the cost of running on the main thread. Prefer `css` whenever possible; reach for `tick` the way you reach for `requestAnimationFrame` — deliberately.
+
+## Global versus local transitions
+
+Here is a default that surprises people *into* good behavior: transitions are *local* by default, meaning a transition plays only when the block that immediately contains its element toggles. If a `{#if}` somewhere above the tree flips and re-renders a subtree, elements deep inside do not suddenly replay their entrances. The default exists because the opposite — Svelte 4's global behavior — produced mass flicker: flip one ancestor condition and a dozen items would animate as if they had all just arrived.
+
+When you genuinely do want that — the classic case is a list whose items should animate whenever the list appears — the `|global` modifier opts in:
+
+```svelte
+{#if showList}
+  {#each items as item (item.id)}
+    <li transition:fade|global>{item.label}</li>
+  {/each}
+{/if}
+```
+
+The mental model: *local* means "I animate when *my* block changes," *global* means "I animate whenever anything above me changes." Read a template with that lens and the modifier stops being magic — it is a scoping decision, made visible at the element.
+
+## Flip animations for list moves
+
+Transitions cover entering and leaving; reordering inside a list is a third case, and it gets its own directive family: `animate:`, which works only on the immediate children of a keyed `{#each}` block:
+
+```svelte
+<script>
+  import { flip } from 'svelte/animate';
+  import { fade } from 'svelte/transition';
+  let queue = $state([
+    { id: 1, title: 'compile' },
+    { id: 2, title: 'test' },
+    { id: 3, title: 'ship' }
+  ]);
+
+  function promote() {
+    queue = [queue[1], queue[0], ...queue.slice(2)];
+  }
+</script>
+
+<button onclick={promote}>promote first</button>
+
+{#each queue as item (item.id)}
+  <li animate:flip={{ duration: 250 }} transition:fade>{item.title}</li>
+{/each}
+```
+
+`flip` — *first, last, invert, play* — measures where a moving item was and where it lands, then animates the delta, so items glide to their new positions instead of teleporting. Combined with the keyed `{#each}` from Chapter 4 (the key is what lets the compiler recognize *the same item* across renders) and a `transition:` for the items that enter or leave mid-shuffle, you get list choreography that usually takes a dedicated animation library. Sortable lists, priority queues, drag-and-drop reorders — `flip` plus a key covers them all in one directive.
+
+## spring and tweened values
+
+The last two tools are not directives at all: `svelte/motion` exports *motion values* — reactive values that interpolate toward their target instead of jumping there:
+
+```svelte
+<script>
+  import { tweened, spring } from 'svelte/motion';
+  import { cubicOut } from 'svelte/easing';
+
+  const progress = tweened(0, { duration: 400, easing: cubicOut });
+  const gauge = spring(0, { stiffness: 0.15, damping: 0.6 });
+
+  async function advance() {
+    progress.current = Math.min(progress.current + 0.25, 1);
+    gauge.current += 1;
+  }
+</script>
+
+<progress value={progress.current}></progress>
+<button onclick={advance}>advance</button>
+```
+
+Write to `.current` — Svelte 5's API, a deliberate change from the old call-the-store style — and the value animates toward the new target on every frame: `tweened` over a fixed duration with an easing curve, `spring` along a physical spring with `stiffness` and `damping`. Because they are reactive values, they slot into the machinery from Chapter 2: templates read them, deriveds compute from them, and — the payoff — SVG attributes, canvas draws, and styles all update per frame with zero animation code in your components. Motion values are state that happens to be continuous; the interface just reads smoother.
+
+## Key takeaways
+
+- Transitions are template directives tied to block lifecycle: the compiler wires entry, exit, and deferred removal, so there is nothing to clean up.
+- `transition:` plays both directions; `in:` and `out:` split them; the five built-ins — `fade`, `fly`, `blur`, `scale`, `slide` — cover most needs with parameter objects.
+- Custom transitions are functions returning a `css` interpolator, which the compiler emits as keyframes; reserve `tick` for genuinely non-CSS effects.
+- Transitions are local by default, replaying only when their own block toggles; `|global` opts into ancestor-triggered replays.
+- `animate:flip` animates reordering inside keyed `{#each}` blocks, and `svelte/motion`'s `tweened` and `spring` provide continuous reactive values — motion without an animation library.
+
+The app is stateful, composed, and now animated. Chapter 8 is the frame around it: SvelteKit, where routes, data, and the server live.

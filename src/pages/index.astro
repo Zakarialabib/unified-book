@@ -1,0 +1,197 @@
+---
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+import TopBar from '../components/TopBar.astro';
+
+const astroChapters = (await getCollection('astro')).sort((a, b) => a.data.order - b.data.order);
+const svelteChapters = (await getCollection('svelte')).sort((a, b) => a.data.order - b.data.order);
+const rustChapters = (await getCollection('rust')).sort((a, b) => a.data.order - b.data.order);
+
+function readingTime(body: string | undefined): number {
+  const prose = (body ?? '').replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]*`/g, ' ');
+  const words = prose.split(/\s+/).filter(Boolean).length;
+  return Math.max(1, Math.round(words / 210));
+}
+
+const allRows = [
+  ...astroChapters.map((c) => ({ ...c, minutes: readingTime(c.body), collection: 'astro' })),
+  ...svelteChapters.map((c) => ({ ...c, minutes: readingTime(c.body), collection: 'svelte' })),
+  ...rustChapters.map((c) => ({ ...c, minutes: readingTime(c.body), collection: 'rust' })),
+];
+const totalMinutes = allRows.reduce((acc, r) => acc + r.minutes, 0);
+---
+
+<Base title="Unified Book Platform" wide>
+  <TopBar />
+
+  <main>
+    <!-- Cover -->
+    <section class="cover wrap">
+      <div class="cover-eyebrow">A Unified Book Platform</div>
+      <h1 class="cover-title">
+        Three Books,<br />One Platform
+      </h1>
+      <p class="cover-deck">
+        The Astro Ecosystem, Reactivity with Svelte, and Systems Programming in Rust — merged into a single reading experience with interactive Svelte components, enhanced voice narration, syntax-highlighted code with copy, and theming.
+      </p>
+      <hr class="cover-rule" />
+
+      <div class="progress-card">
+        <div class="pc-top">
+          <span class="pc-label">Your reading progress</span>
+          <span class="pc-count" id="pc-count"><em>0</em> of {allRows.length} chapters read</span>
+        </div>
+        <div class="pc-bar"><div class="pc-fill" id="pc-fill"></div></div>
+        <div class="pc-actions">
+          <a class="btn primary" id="continue-link" href="#chapters">
+            Start reading →
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Series cards -->
+    <section class="wrap">
+      <div class="series-grid">
+        <a class="series-card" href="/chapters/astro">
+          <div class="card-fe">Ae</div>
+          <div class="card-title">The Astro Ecosystem</div>
+          <div class="card-desc">Content-first sites, islands architecture, zero JS by default. From MDX content collections to Starlight docs and shipping.</div>
+          <div class="card-count">{astroChapters.length} chapters · {astroChapters.reduce((acc, c) => acc + readingTime(c.body), 0)} min</div>
+        </a>
+        <a class="series-card" href="/chapters/svelte">
+          <div class="card-fe" style="color: #c92907">Sv</div>
+          <div class="card-title">Reactivity with Svelte</div>
+          <div class="card-desc">Runes, components, bindings, effects, shared state, transitions, SvelteKit, and shipping. Reactivity as language, not library.</div>
+          <div class="card-count">{svelteChapters.length} chapters · {svelteChapters.reduce((acc, c) => acc + readingTime(c.body), 0)} min</div>
+        </a>
+        <a class="series-card" href="/chapters/rust">
+          <div class="card-fe" style="color: #c92907">Fe</div>
+          <div class="card-title">Systems Programming in Rust</div>
+          <div class="card-desc">Memory and ownership, borrowing, traits, concurrency, async, unsafe, FFI, and shipping a CLI. Compile-time guarantees.</div>
+          <div class="card-count">{rustChapters.length} chapters · {rustChapters.reduce((acc, c) => acc + readingTime(c.body), 0)} min</div>
+        </a>
+      </div>
+    </section>
+
+    <!-- Table of contents -->
+    <section class="toc-block wrap">
+      <div class="toc-section-head">
+        <div class="toc-label">All Chapters</div>
+        <h2>{allRows.length} chapters · ~{totalMinutes} minutes</h2>
+      </div>
+      <div class="search-box" id="search-box">
+        <input type="text" id="search-input" placeholder="Search chapters…" aria-label="Search chapters" />
+        <span id="search-count" style="font-size:0.78rem;color:var(--ink-3)"></span>
+      </div>
+      <ol class="chapters-list" id="chapters-list">
+        {
+          allRows.map((c) => (
+            <li class="ch-row" data-slug={c.id} data-collection={c.collection}>
+              <a href={`/chapters/${c.collection}/${c.id}/`}>
+                <span class="ch-num">{String(c.data.order).padStart(2, '0')}</span>
+                <span class="ch-body">
+                  <span class="ch-title">{c.data.title}</span>
+                  <span class="ch-sub" style="display:block">{c.data.subtitle}</span>
+                  <span class="ch-meta">
+                    <span class="lvl">{c.data.level}</span>
+                    <span>{c.data.series}</span>
+                    <span>{c.minutes} min</span>
+                  </span>
+                </span>
+                <span class="ch-state" data-state>unread</span>
+              </a>
+            </li>
+          ))
+        }
+      </ol>
+    </section>
+
+    <!-- Features -->
+    <section class="about">
+      <div class="about-grid">
+        <div>
+          <h3>📝 Code Copy & Syntax Highlight</h3>
+          <p>Every code block has a copy button. Syntax highlighting via Shiki with theme-aware colors. Toggle between light and dark themes.</p>
+        </div>
+        <div>
+          <h3>🎙️ Enhanced Voice Narration</h3>
+          <p>Listen to chapters with improved TTS voices. Choose your voice, adjust speed, and follow along with highlighted text.</p>
+        </div>
+        <div>
+          <h3>🎨 Theming & Component Library</h3>
+          <p>Switch between series-specific themes or mix them. A reusable component library powers all interactive elements.</p>
+        </div>
+        <div>
+          <h3>📖 Code Examples: Src → Output</h3>
+          <p>See the source code alongside its compiled/generated output. Understand how Svelte runes compile, how Rust code behaves, and how Astro islands work.</p>
+        </div>
+        <div>
+          <h3>📄 Client Documentation</h3>
+          <p>Generate educational and promotional documentation for your clients from the same content. Export-ready templates.</p>
+        </div>
+        <div>
+          <h3>🔗 Svelte Islands in Astro</h3>
+          <p>Svelte components render as interactive islands within Astro pages. Edit code live, see results instantly.</p>
+        </div>
+      </div>
+    </section>
+
+    <footer class="colophon wrap">
+      Built with Astro + Svelte + Rust · Content in MDX · One unified platform
+    </footer>
+  </main>
+</Base>
+
+<script>
+  const KEY_READ = 'unifiedbook-read-v1';
+  function getRead(): string[] {
+    try { return JSON.parse(localStorage.getItem(KEY_READ) || '[]'); } catch { return []; }
+  }
+  const rows = Array.from(document.querySelectorAll<HTMLElement>('.ch-row[data-slug]'));
+  const count = document.getElementById('pc-count');
+  const fill = document.getElementById('pc-fill');
+  const continueLink = document.getElementById('continue-link') as HTMLAnchorElement | null;
+
+  /* ---------- search ---------- */
+  const searchInput = document.getElementById('search-input');
+  const searchCount = document.getElementById('search-count');
+
+  function filterChapters(q: string) {
+    const term = q.toLowerCase();
+    let visible = 0;
+    rows.forEach((row) => {
+      const haystack = [
+        row.querySelector('.ch-title')?.textContent ?? '',
+        row.querySelector('.ch-sub')?.textContent ?? '',
+        row.querySelector('.lvl')?.textContent ?? '',
+        row.querySelector('.ch-meta span:last-child')?.textContent ?? '',
+      ].join(' ').toLowerCase();
+      const match = !term || haystack.includes(term);
+      row.classList.toggle('hidden', !match);
+      if (match) visible++;
+    });
+    if (searchCount) searchCount.textContent = term ? `${visible} of ${rows.length}` : '';
+  }
+  if (searchInput) searchInput.addEventListener('input', (e) => filterChapters((e.target as HTMLInputElement).value));
+
+  function paint() {
+    const read = getRead();
+    rows.forEach((row) => {
+      const isRead = read.includes(row.dataset.slug || '');
+      row.classList.toggle('is-read', isRead);
+      const state = row.querySelector('[data-state]');
+      if (state) state.innerHTML = isRead ? '<span class="tick">✓</span> read' : 'unread';
+    });
+    const n = rows.filter((r) => read.includes(r.dataset.slug || '')).length;
+    if (count) count.innerHTML = `<em>${n}</em> of ${rows.length} chapters read`;
+    if (fill) fill.style.width = `${(n / rows.length) * 100}%`;
+    const firstUnread = rows.find((r) => !read.includes(r.dataset.slug || ''));
+    if (continueLink && rows.length) {
+      const target = firstUnread || rows[rows.length - 1];
+      continueLink.setAttribute('href', target.dataset.slug ? `/chapters/${target.dataset.collection}/${target.dataset.slug}/` : '#');
+      continueLink.textContent = n === 0 ? 'Start reading →' : n === rows.length ? 'Read it again →' : 'Continue reading →';
+    }
+  }
+  paint();
+</script>

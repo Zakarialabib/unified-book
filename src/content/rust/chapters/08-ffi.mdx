@@ -1,0 +1,164 @@
+---
+order: 8
+title: "FFI — Foreign Function Interface"
+subtitle: "rust at the border"
+description: "Sooner or later Rust must shake hands with C — the lingua franca of every OS and library. This chapter covers both directions of that handshake: calling C from Rust, and exporting Rust for the world to call, with the ownership rules carried across the border intact."
+level: "Systems"
+---
+
+Every operating system on earth speaks C. Drivers expose C headers, databases ship C clients, GPUs and codecs come as C libraries, and every language runtime — Python, Node, the JVM, the Web — defines its plugin boundary in C terms. Rust's answer to that world is FFI: a thin, explicit, *unsafe-at-the-border* layer that maps Rust types to C types and back. If chapter 7 taught you the contract of unsafe, this chapter is where you spend it — and where you learn to confine it to a thin strip of code called the boundary.
+
+This matters doubly for you. Tauri — the framework in your own stack — is this pattern at scale: a Rust core, a webview front end, and a carefully designed boundary between them. FFI is the same idea one level down, minus the niceties.
+
+## Calling C from Rust
+
+An `extern` block declares foreign functions: names, signatures, and the ABI to call them with. Here is the classic first example — the C standard library, which on most platforms needs no explicit linking at all:
+
+```rust
+use std::os::raw::c_int;
+
+extern "C" {
+    fn abs(input: c_int) -> c_int;
+    fn cos(input: f64) -> f64;
+}
+
+fn main() {
+    let n: c_int = -7;
+    // Safety: `abs` is a pure function on any c_int; no pointers involved.
+    let result = unsafe { abs(n) };
+    println!("|{n}| = {result}");
+}
+```
+
+Everything about the `unsafe` is chapter 7 applied: the compiler *cannot* verify that `abs` exists, that its signature matches the real one, or that it behaves — you have transcribed a promise from a C header, and the unsafe block marks where that promise is spent. Get the signature wrong and there is no compile error at the call site; there is undefined behavior at runtime. Which is why real bindings are generated, not hand-written — that comes in a moment.
+
+For libraries beyond libc, you declare the link target so the linker knows what to search for:
+
+```rust
+#[link(name = "sqlite3")]
+extern "C" {
+    fn sqlite3_libversion() -> *const std::os::raw::c_char;
+}
+```
+
+## Mapping types across the border
+
+The border needs type law, and the law is `#[repr(C)]`. By default, Rust orders struct fields however it likes; `repr(C)` freezes the layout into C-compatible order so both compilers agree byte-for-byte:
+
+```rust
+#[repr(C)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+```
+
+Scalars map directly (`i32`/`u8`/`f64` are the same in both worlds); pointers map to `*const T`/`*mut T`; and the two Rust-only troublemakers need special handling. **Strings**: a C string is a null-terminated byte buffer; a Rust `String` is a pointer plus a length and *no terminator* — they are different animals. `CString`/`CStr` are the customs officers:
+
+```rust
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+
+fn strlen_demo(s: &str) {
+    let c = CString::new(s).unwrap(); // copies + appends NUL
+                                      // (fails if s contains an interior NUL)
+    let p: *const c_char = c.as_ptr();
+    unsafe {
+        let len = libc::strlen(p);
+        println!("len = {len}");
+    }
+}
+```
+
+Note the asymmetry, because it drives all the rules: *into* C you can copy (`CString::new`); *out of* C you must borrow cautiously (`CStr::from_ptr` trusts that the pointer is valid and NUL-terminated) and copy out (`to_string_lossy().into_owned()`) before anything else touches it. **Function pointers**: C allows null function pointers, and Rust's `fn` type does not — the idiom is `Option<unsafe extern "C" fn(u32)>`, where `None` is the null case. Rust guarantees the niche optimization makes it the same size.
+
+## Exporting Rust: being the library
+
+The other direction makes Rust functions callable from C — the building block for plugins in any language, shared libraries, and Tauri-style cores. Two annotations do the work: `#[no_mangle]` keeps the symbol name un-mangled so C can find it, and `extern "C"` picks the calling convention:
+
+```rust
+use std::os::raw::c_char;
+
+#[no_mangle]
+pub extern "C" fn rust_add(a: i32, b: i32) -> i32 {
+    a + b
+}
+```
+
+`rust_add` now appears in the shared library as a plain C symbol — callable from Python's `ctypes`, Node's FFI, C, Swift, whatever. Compile with `crate-type = ["cdylib"]` in `Cargo.toml` for a C-compatible dynamic library, or `staticlib` for static linking.
+
+Numbers are trivial. The moment ownership crosses the border, you are designing an API contract. The pattern for heap objects: hand out an opaque pointer, and pair every constructor with an explicit destructor that C must call:
+
+```rust
+/// Opaque handle: C sees a pointer, never the struct.
+#[repr(C)]
+pub struct Buffer {
+    data: Vec<u8>,
+}
+
+#[no_mangle]
+pub extern "C" fn buffer_new(len: usize) -> *mut Buffer {
+    Box::into_raw(Box::new(Buffer { data: vec![0; len] }))
+}
+
+/// # Safety
+/// - `buf` must come from `buffer_new` and not be used after this call.
+#[no_mangle]
+pub unsafe extern "C" fn buffer_free(buf: *mut Buffer) {
+    if !buf.is_null() {
+        drop(Box::from_raw(buf)); // ownership returns to Rust: Vec is dropped
+    }
+}
+
+/// # Safety
+/// - `buf` must be valid, and `out` must have room for `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn buffer_read(buf: *const Buffer, out: *mut u8, len: usize) {
+    let buf = &*buf; // borrow the Box'd value
+    let out = std::slice::from_raw_parts_mut(out, len);
+    let n = len.min(buf.data.len());
+    out[..n].copy_from_slice(&buf.data[..n]);
+}
+```
+
+Study the shape: `Box::into_raw` *transfers* ownership across the border (chapter 1's move, with C as the new owner); `Box::from_raw` takes it back, and the `Drop` runs on the Rust side where it belongs. The `# Safety` sections are the API's terms of service — C cannot break the borrow checker, so the doc comments and disciplined exports are the enforcement.
+
+**Panics must not unwind across the border** — C has no idea what a Rust panic is. Either compile with `panic = "abort"`, or guard each exported function:
+
+```rust
+#[no_mangle]
+pub extern "C" fn safe_entry(x: i32) -> i32 {
+    match std::panic::catch_unwind(|| might_panic(x)) {
+        Ok(v) => v,
+        Err(_) => -1, // C-visible error code instead of UB
+    }
+}
+```
+
+## Bindings at scale
+
+Hand-writing signatures for a real C library does not scale, and worse — typos become silent UB. The ecosystem's answer is generation in both directions. **bindgen** reads C headers and emits the `extern` blocks (compiled against `libclang`); **cbindgen** reads your Rust and emits C headers for your exported functions. The convention that ties crates.io together is the **`-sys` crate**: `foo-sys` contains *only* generated declarations and linking logic, raw and unsafe; a safe `foo` crate (often the same project) wraps it with real Rust types, `Result`s, and lifetimes — chapter 7's wall, drawn around every C dependency in the ecosystem.
+
+```toml
+# Cargo.toml
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+```
+
+`rusqlite` is the pattern executed end-to-end: it vendors and compiles SQLite (via `libsqlite3-sys`, bindgen-generated), then hands you `Connection` and `Statement` types with RAII closing, `Result` everywhere, and zero unsafe in your code. When you must bind something yourself, copy that layering: `-sys` raw, wrapper safe, boundary thin.
+
+One more border rule worth engraving: **thread safety is part of the contract.** If the C library says "not thread-safe," your wrapper must prove it — wrap the handle in a type that is not `Send`/`Sync` (a raw pointer is neither, by default, which is the safe starting point) or serialize access behind a mutex, and only `unsafe impl Send` (chapter 7) when the C documentation genuinely warrants it.
+
+## The border in your stack
+
+The pattern generalizes beyond C. **PyO3** exposes Rust as Python modules with GIL-aware wrappers; **napi-rs** does the same for Node; **wasm-bindgen** for the browser; **UniFFI** generates bindings for Kotlin/Swift from one Rust core. Tauri sits in this family too — its *command* system is an ergonomic boundary layer (JSON-typed, promise-based) over the same Rust-core/foreign-front-end divide, and the same design instincts apply: validate at the border, own your side's memory, keep the unsafe — or the serialization — confined to one thin layer, and everything behind it stays idiomatic Rust.
+
+## Key takeaways
+
+- `extern` blocks declare C functions; the call is `unsafe` because *you* vouch that the signature and behavior match the real library.
+- `#[repr(C)]` fixes struct layout; `CString`/`CStr` translate strings; `Option<extern "C" fn>` represents nullable callbacks.
+- Export with `#[no_mangle] pub extern "C" fn`, hand out opaque `Box::into_raw` handles, pair constructors with `_free` destructors, and never let a panic unwind across the border.
+- Real bindings are generated — bindgen for C-to-Rust, cbindgen for Rust-to-C — and layered as raw `-sys` crates plus safe wrappers.
+- Thread-safety claims about foreign libraries are contracts: default handles to non-`Send`, and only `unsafe impl` with documented evidence.
+
+You now hold the full language: memory, behavior, errors, both concurrency models, and the border. One thing remains — turning all of it into something a user can install and run. The final chapter ships a real CLI, from `cargo new` to crates.io.

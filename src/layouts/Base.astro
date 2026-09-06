@@ -1,0 +1,46 @@
+---
+import '../styles/book.css';
+
+interface Props {
+  title: string;
+  description?: string;
+  wide?: boolean;
+  series?: string;
+  color?: string;
+}
+
+const { title, description = 'A unified book platform merging The Astro Ecosystem, Reactivity with Svelte, and Systems Programming in Rust.', wide = false, series = 'Unified Book', color = '#5628b4' } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" data-theme="light" data-series={series} data-color={color}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content={description} />
+    <meta name="generator" content={Astro.generator} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,700;1,9..144,400;1,9..144,500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <title>{title}</title>
+    <script is:inline>
+      (function () {
+        try {
+          var t = localStorage.getItem('unifiedbook-theme');
+          if (!t) t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dim' : 'light';
+          document.documentElement.dataset.theme = t;
+        } catch (e) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div class="progress-line" id="progress-line"></div>
+    <slot />
+  </body>
+</html>

@@ -1,0 +1,179 @@
+---
+order: 8
+title: "The Client Router & Actions"
+subtitle: "smooth navigation and type-safe forms"
+description: "The client router turns full page loads into seamless navigations; actions turn form posts into typed, validated server calls. Together they close the interactivity gap without becoming an SPA."
+level: "Advanced"
+---
+
+Two gaps have been left open on purpose. Navigation costs a full page load — fast, but perceptible. And forms do the most honest thing on the web: a round trip, a fresh page, and whatever the server says. This chapter closes both gaps without reneging on Chapter 1's deal. The *client router* intercepts navigations and swaps pages in place, with animated transitions and state that survives. *Actions* turn form posts into typed, validated server functions. Neither is a runtime you live inside — they are two thin upgrades to a multi-page site, and each degrades to the plain web behavior underneath if JavaScript never loads.
+
+## What the client router buys you
+
+A multi-page navigation is: browser requests a URL, receives a whole new document, throws away the old one, repaints everything. It is robust and it is stateless, and for most content sites it is fast enough that nobody complains — which is why Astro's default has no client router at all. The upgrade matters when full repaints are noticeable: a header that flickers, a scroll position that resets on a filtered list, a page-to-page flow that should feel like one product.
+
+The client router changes the mechanics, not the model. Navigations are intercepted, the next page's HTML is fetched, and the DOM is swapped — the browser never builds an app, because there is no app; there is a sequence of documents, brokered smoothly. Everything stays a real URL that prefetches, caches, and works with JavaScript disabled, where the fallback is the ordinary full page load you had before. This is the "MPA renaissance" from Chapter 1 in shipped form: the browser keeps its architecture, and you borrow back the parts of SPA navigation people actually miss.
+
+## `<ClientRouter />` and the navigation lifecycle
+
+The router is opt-in, one component in the layout head:
+
+```astro
+---
+// src/layouts/BaseLayout.astro
+import { ClientRouter } from "astro:transitions";
+---
+<head>
+  <meta charset="utf-8" />
+  <title>{title}</title>
+  <ClientRouter />
+</head>
+```
+
+From then on, same-origin link clicks go through the router. The lifecycle emits events you can hook, and one matters above the rest: after each swap the DOM is new, so any page-level setup you used to do on load needs re-running:
+
+```astro
+<script>
+  document.addEventListener("astro:after-swap", () => {
+    // the old document is gone: re-announce the page view
+    window.dataLayer?.push({ event: "pageview", path: location.pathname });
+  });
+</script>
+```
+
+The full sequence runs `astro:before-preparation`, `astro:after-preparation` (new page fetched), `astro:before-swap`, `astro:after-swap` (DOM replaced). Scripts behave sensibly: module scripts execute once per site lifetime, so this listener — like the deduplicated scripts from Chapter 5 — survives across navigations precisely because it registered once and listens on `document`. Analytics is the canonical use, and forgetting the `after-swap` hook is the canonical bug: a site that looks instrumented and reports exactly one page view.
+
+## transition:animate and transition:name
+
+Swapped pages don't have to hard-cut. The `transition:animate` directive animates any element across a navigation — built-ins include `fade`, `slide`, and `none`:
+
+```astro
+---
+import { slide } from "astro:transitions";
+---
+<article transition:animate={slide({ duration: "0.2s" })}>
+  <h1>Each article slides in, briefly</h1>
+</article>
+```
+
+The more interesting directive is `transition:name`, which pairs elements *across pages*. Give the post title on the listing page and the post title on the detail page the same name, and the browser morphs one into the other during navigation — the shared-element transition that made native apps feel expensive:
+
+```astro
+<!-- listing page -->
+<h2 transition:name={`title-${post.id}`}><a href={`/blog/${post.id}`}>{post.data.title}</a></h2>
+
+<!-- detail page -->
+<h1 transition:name={`title-${post.id}`}>{post.data.title}</h1>
+```
+
+Names must be unique per page, and template-literal names keyed on the item's id are the pattern that scales — one dynamic route, one name per entry. Under the hood these directives compile to the View Transitions API, so the animation is the browser's own machinery, skipped gracefully where the API is missing.
+
+## State that survives with transition:persist
+
+A swap replaces the DOM, which raises the question of what should *not* be replaced: the audio player that must keep playing, the sidebar search box holding its query, an island with state the user has arranged. `transition:persist` marks an element — most usefully an island — as the survivor:
+
+```astro
+---
+import AudioPlayer from "../components/AudioPlayer.svelte";
+---
+<AudioPlayer
+  client:load
+  transition:persist="podcast-player"
+  src="/episodes/42.mp3"
+/>
+```
+
+When navigating between two pages that both render an element with that persist key, the router keeps the existing instance and swaps everything around it. The island keeps its runtime state — Svelte state included, since the component itself is never torn down — and a playing episode keeps playing. Without the directive, the same markup would hydrate fresh on every page: correct, but the kind of correctness that makes users close the tab. Persist is also the answer to a question the SPA crowd asks about MPAs: no, the page does not reload — the parts you persist don't, and the parts you don't are fresh documents, which is the trade working as designed.
+
+## Forms the Astro way
+
+A form is a POST to a URL, and the web's default form experience is: submit, wait, receive a new page. That default is *good* — it works without JavaScript, it survives slow phones, and it is the baseline any enhancement must preserve. Astro's actions API keeps the baseline and upgrades the tooling. Define an action on the server:
+
+```ts
+// src/actions/index.ts
+import { defineAction, ActionError } from "astro:actions";
+import { z } from "astro:schema";
+
+export const server = {
+  newsletter: defineAction({
+    input: z.object({
+      email: z.string().email(),
+    }),
+    handler: async (input, context) => {
+      const ok = await addSubscriber(input.email);
+      if (!ok) {
+        throw new ActionError({
+          code: "BAD_REQUEST",
+          message: "The list is temporarily unavailable.",
+        });
+      }
+      return { subscribed: true };
+    },
+  }),
+};
+```
+
+The form binds to it directly, and this is the progressive-enhancement trick worth naming: with JavaScript, you get smooth handling; without it, the form is a plain POST to an endpoint Astro generates — where SvelteKit hands you `use:enhance` to layer this on, Astro's no-JS path *is* the native path, and everything else sweetens it:
+
+```astro
+---
+// src/pages/subscribe.astro
+import { actions } from "astro:actions";
+---
+<form method="POST" action={actions.newsletter}>
+  <label>
+    Email <input type="email" name="email" required />
+  </label>
+  <button>Subscribe</button>
+</form>
+```
+
+## Actions: define, call, validate
+
+The action above is half the API; the other half is calling it. From client-side code, actions are typed functions — the input type comes from the zod schema, the result type from the handler's return:
+
+```ts
+import { actions } from "astro:actions";
+
+const { data, error } = await actions.newsletter({ email: "reader@example.com" });
+if (error) {
+  // error.code: "BAD_REQUEST", error.message from the ActionError
+}
+```
+
+Validation is the schema's job: a malformed payload is rejected before `handler` runs, so the handler trusts `input.email` the way Rust code trusts a parsed type — the boundary does the checking, the interior does the work. `ActionError` is how a handler reports failure with a code the client can branch on; anything thrown unwrapped becomes a generic server error, so wrap the failures you expect and let the ones you don't stay loud.
+
+For the no-JS form path, the result of a submission is available on the re-rendered page:
+
+```astro
+---
+// src/pages/subscribe.astro
+import { actions } from "astro:actions";
+
+const result = Astro.getActionResult(actions.newsletter);
+---
+{result?.error && <p role="alert">{result.error.message}</p>}
+{result?.data && <p>Check your inbox to confirm.</p>}
+<form method="POST" action={actions.newsletter}>
+  <!-- ... -->
+</form>
+```
+
+`Astro.getActionResult` is present only when that form just posted to this page — error or success, the server renders the outcome, no client state required. The division of labor across the book now closes: pages render (Chapters 2 and 3), content is typed and queryable (Chapter 4), rendering modes choose where code runs (Chapter 6), and actions are the typed, validated contract at the POST boundary between them.
+
+## Where SPAs still win
+
+Honesty requires the boundary. The client router makes document navigation *feel* continuous, but a genuinely app-shaped product — one screen, hundreds of state transitions, optimistic everything, offline-first sync — is still better served by an SPA framework, for the same reason Chapter 1 gave: when every route is a live view, you want a runtime that owns the view, not a broker between documents. The gap the router closes is precisely the gap between "docs site" and "docs site where navigation doesn't flicker."
+
+The mature pattern is a spectrum, and Astro holds both ends. Content pages: static, zero JS, client router smoothing the edges. App-shaped corners: islands with `transition:persist` surviving navigation, actions handling their mutations, endpoints feeding them data. And when a product outgrows the document model entirely — the dashboard case from Chapter 1 — the stack you built here exports cleanly: the actions and endpoints remain a typed API, and the SPA framework of your choice consumes them. You are not choosing a religion; you are placing each screen on the static-to-app spectrum, with the tools to move it later.
+
+## Key takeaways
+
+- The client router is opt-in via `<ClientRouter />` and turns navigations into DOM swaps while keeping real URLs, prefetching, and a no-JS fallback.
+- `astro:after-swap` is the event that matters most: the DOM is new after every navigation, so page-view reporting and other document-level setup must re-run there.
+- `transition:name` morphs elements across pages and `transition:animate` styles the swap; `transition:persist` keeps islands — and their state — alive across navigations.
+- Actions pair a zod `input` schema with a typed `handler`; validation happens at the boundary, failures surface as `ActionError` with a code, and forms bind with `action={actions.newsletter}`.
+- The no-JS form path is native, not degraded: `Astro.getActionResult` renders the outcome on the server, which is progressive enhancement without a `use:enhance` layer.
+- SPAs still win for state-heavy, single-screen products — and the actions and endpoints you built here remain a typed API when a screen outgrows the document model.
+
+One chapter remains: the ecosystem that wraps all of this — docs themes, integrations, adapters — and the production checklist for shipping it.

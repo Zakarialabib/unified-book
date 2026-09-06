@@ -1,0 +1,205 @@
+---
+order: 3
+title: "Components, Props & Events"
+subtitle: "composition with snippets and callback props"
+description: "Props in with $props, children as snippets, events as plain callback props — Svelte 5's component model is smaller and more predictable than the dispatcher era it replaced."
+level: "Foundations"
+---
+
+State, from Chapter 2, lives inside a component. Almost nothing interesting stays there: real interfaces are trees of components exchanging values downward and notifications upward. Svelte 5's answer is deliberately small — one rune for inputs, one construct for composable markup, and ordinary functions for events. This chapter covers the whole surface of the component contract, because once it is precise, everything from design systems to form libraries becomes legible.
+
+## The component contract
+
+A Svelte component is a `.svelte` file you import and use like an HTML element. The contract has three directions: *props* flow in from parent to child, *callbacks* flow out from child to parent, and *children* are passed in as markup to render. That is the entire protocol — there is no context object to master before you can wire two components together.
+
+```svelte
+<!-- App.svelte -->
+<script>
+  import Rating from './Rating.svelte';
+  let score = $state(4);
+</script>
+
+<Rating value={score} max={5} onSelect={(next) => (score = next)} />
+```
+
+Note the shape of that call. `value` and `max` are data flowing down; `onSelect` is a function the child will call when something happens. If you have written React, the direction is familiar; if you have written Svelte 4, the difference will be — the dispatcher is gone, and we will get to that honestly in a moment. First, the receiving end.
+
+## $props with TypeScript
+
+A component declares everything it accepts by destructuring from `$props()`:
+
+```svelte
+<!-- Rating.svelte -->
+<script lang="ts">
+  import type { Snippet } from 'svelte';
+
+  interface Props {
+    value?: number;
+    max?: number;
+    label?: string;
+    onSelect?: (value: number) => void;
+    children?: Snippet;
+  }
+
+  let { value = 0, max = 5, label = 'rating', onSelect, children }: Props = $props();
+</script>
+```
+
+That destructuring is the entire props API. Defaults sit inline where a reader expects them, required props are the ones without defaults, and TypeScript support comes from annotating the destructuring pattern with an interface — the compiler checks both sides of every usage, so a typo like `onselect` in the parent is caught at build time. The `children?: Snippet` entry anticipates the next section: children are just another prop, with a type of their own. Because `$props()` is destructured once at the top of the script, a component's public surface is always visible in one place — there is nowhere for an undocumented prop to hide.
+
+## Rest props and spreading
+
+Wrapper components constantly need to say "take everything I did not name and forward it." The rest pattern does exactly that, and spreading passes it along:
+
+```svelte
+<!-- Button.svelte -->
+<script lang="ts">
+  import type { HTMLButtonAttributes } from 'svelte/elements';
+
+  interface Props extends HTMLButtonAttributes {
+    variant?: 'primary' | 'ghost';
+  }
+
+  let { variant = 'primary', class: className = '', children, ...rest }: Props = $props();
+</script>
+
+<button class={`btn ${variant} ${className}`} {...rest}>
+  {@render children?.()}
+</button>
+```
+
+Three details repay attention. The rest pattern `...rest` collects every prop the component did not destructure — including `disabled`, `aria-label`, and any `onclick` a caller passes — so a wrapper stays transparent instead of becoming a chokepoint. `class` is renamed during destructuring because it is not a legal identifier on its own. And `interface Props extends HTMLButtonAttributes` borrows the DOM's own attribute types from `svelte/elements`, so your button accepts everything a real button does, with types, for free. This extend-and-forward pattern is the backbone of most component libraries.
+
+## Children and snippets
+
+Children — the markup between a component's tags — arrive as a prop named `children`, and you render it where it belongs with `{@render children()}`:
+
+```svelte
+<!-- Card.svelte -->
+<script lang="ts">
+  import type { Snippet } from 'svelte';
+
+  let { title, children }: { title: string; children: Snippet } = $props();
+</script>
+
+<article class="card">
+  <h2>{title}</h2>
+  <div class="body">{@render children()}</div>
+</article>
+```
+
+```svelte
+<!-- App.svelte -->
+<Card title="Release notes">
+  <p>Everything the compiler fixed this week.</p>
+</Card>
+```
+
+The mechanism is the *snippet*: a reusable chunk of template that compiles to a function. `children` is the implicit snippet a parent writes between your tags, and `{@render children()}` is the explicit call — including the parentheses, because you are invoking it, wherever and however many times you like. If children are optional, type the prop as `Snippet | undefined` and render with `{@render children?.()}`. If you met Svelte 4, this replaces the `<slot />` element entirely: snippets are values, so they can be stored, passed as props, and rendered conditionally, which slots could never do.
+
+## Snippets with parameters
+
+Snippets can take arguments, which is how a component hands its caller the data to render — the job slot props used to do:
+
+```svelte
+<!-- Table.svelte -->
+<script lang="ts">
+  import type { Snippet } from 'svelte';
+
+  interface Row {
+    id: number;
+    name: string;
+    price: number;
+  }
+
+  let { rows, row }: { rows: Row[]; row: Snippet<[Row]> } = $props();
+</script>
+
+<table>
+  {#each rows as item (item.id)}
+    <tr>{@render row(item)}</tr>
+  {/each}
+</table>
+```
+
+The parent declares a named snippet with `{#snippet row(item)}`, and the type `Snippet<[Row]>` documents that it receives one `Row` per render:
+
+```svelte
+<!-- App.svelte -->
+<Table rows={items}>
+  {#snippet row(item)}
+    <td>{item.name}</td>
+    <td>{item.price.toFixed(2)}</td>
+  {/snippet}
+</Table>
+```
+
+The inversion is worth savoring: `Table` owns the looping and the markup of the row shell, while the caller owns the cells. Snippets close over their declaring scope, so `item` here plus any local state are both available inside — no render-prop indirection, no `let:` directives to remember.
+
+## Callback props instead of events
+
+In Svelte 5, an "event" from a child component is a prop whose name starts with `on` and whose value is a function. The child calls it; the parent decides what it means:
+
+```svelte
+<!-- SearchBox.svelte -->
+<script lang="ts">
+  interface Props {
+    onSearch: (query: string) => void;
+  }
+
+  let { onSearch }: Props = $props();
+  let query = $state('');
+
+  function submit(event: SubmitEvent) {
+    event.preventDefault();
+    onSearch(query);
+  }
+</script>
+
+<form onsubmit={submit}>
+  <input bind:value={query} placeholder="search the docs" />
+  <button>search</button>
+</form>
+```
+
+The honesty first: Svelte 4's `createEventDispatcher` — with its `on:message` listener syntax — still exists but is deprecated, and new code should not use it. The replacement is a deliberate upgrade. Callback props are ordinary values, so they compose with the rest of the language: they are typed, they can be optional, they can be renamed or wrapped, and they show up in the same destructuring as every other prop. DOM events work the same way — Svelte 5 uses the platform's lowercase names, so you write `onclick` and `oninput` as attributes rather than `on:click` and `on:input` directives. One convention, everywhere.
+
+## Composition patterns
+
+Because snippets and callbacks are values, the composition patterns are the ones functions already taught you. A component can offer named snippets as props, each with a fallback rendered only when the caller omits it:
+
+```svelte
+<!-- Modal.svelte -->
+<script lang="ts">
+  import type { Snippet } from 'svelte';
+
+  interface Props {
+    title: string;
+    header?: Snippet;
+    footer?: Snippet;
+    children: Snippet;
+  }
+
+  let { title, header, footer, children }: Props = $props();
+</script>
+
+<div class="modal" role="dialog" aria-label={title}>
+  <header>
+    {#if header}{@render header()}{:else}<h3>{title}</h3>{/if}
+  </header>
+  <div class="content">{@render children()}</div>
+  {#if footer}<footer>{@render footer()}</footer>{/if}
+</div>
+```
+
+Callers fill in only the parts they care about and can even build a snippet once and pass it to several components. The design discipline that falls out of this chapter: data down through props, decisions up through callbacks, structure in through snippets. A component that reaches outward any other way — global state read in a leaf, a parent reached into from a child — is a design smell we will have the tools to name by Chapter 6.
+
+## Key takeaways
+
+- The component contract is three directions: `$props()` in, callback props out, snippets in as renderable markup — no dispatcher, no slots.
+- Destructuring `$props()` with an interface is the whole typing story: defaults inline, required props visible, errors caught on both sides.
+- The rest pattern plus spreading keeps wrappers transparent, and `HTMLButtonAttributes`-style interfaces borrow the DOM's own types.
+- `children` is a `Snippet` — a compiled function you render with `{@render children()}`, optionally with parameters typed as `Snippet<[Row]>`.
+- Events are callback props named `onSomething`, and DOM events use the platform's lowercase names like `onclick`; `createEventDispatcher` is deprecated.
+
+Props carry data down; next we look at the template syntax that decides what renders — conditionals, lists, and the two-way `bind:` wiring.

@@ -1,0 +1,197 @@
+---
+order: 8
+title: "SvelteKit"
+subtitle: "routing, load, and form actions"
+description: "SvelteKit is the app framework around Svelte: file-based routing, load functions that run anywhere, server endpoints, and form actions that work before JavaScript arrives."
+level: "Advanced"
+---
+
+Everything so far assumed your components live in an app that already exists. SvelteKit is that app: the official framework around the compiler, owning the router, the server, the data-fetching contract, and the build targets. If Chapter 1's Svelte is the engine, SvelteKit is the chassis — and its design goal is the same one stated honestly: do at build time what can be done at build time, and keep a single contract that works with or without JavaScript.
+
+## SvelteKit in one picture
+
+A request hits SvelteKit and the machinery runs in a fixed order: the URL is matched against a route, the route's `load` functions fetch data (on the server, or in the browser for client-side navigation), the page component renders with that data, and the response is HTML on first visit and JSON thereafter. Forms can round-trip through *actions* without any JavaScript at all. You create a project with `npx sv create`, and the whole contract lives in a handful of special files, each named by role: `+page.svelte` renders, `+page.ts` or `+page.server.ts` loads, `+server.ts` answers HTTP, `+layout.svelte` wraps.
+
+That naming is the trick worth internalizing — the `+` files are the framework's API surface. Everything else in `src/lib` is your ordinary code, imported wherever you like. The rest of this chapter walks the contract in the order a request meets it.
+
+## File-based routing with +page and +layout
+
+Routes are directories under `src/routes`; a directory becomes a URL segment, and a `+page.svelte` inside it becomes the page:
+
+```text
+src/routes/
+├── +layout.svelte        ← shared shell: nav, footer, {#each}-free chrome
+├── +page.svelte          ← /
+├── about/
+│   └── +page.svelte      ← /about
+├── blog/
+│   ├── +page.svelte      ← /blog
+│   └── [slug]/
+│       └── +page.svelte  ← /blog/:slug
+└── (app)/                ← layout group: shared layout, no URL segment
+    ├── dashboard/
+    │   └── +page.svelte  ← /dashboard
+    └── settings/
+        └── +page.svelte  ← /settings
+```
+
+Square brackets make a dynamic parameter, reachable as `params.slug` in load functions and `$page`-free via props in the page. Parentheses make a *layout group* — several sections sharing one layout without the group name appearing in the URL, which is how you give marketing pages one shell and the app another. A `+layout.svelte` wraps every page below it and receives its children the way Chapter 3 taught: as a snippet, rendered with `{@render children()}`. Layouts nest, and each level's `+error.svelte` catches failures from below it. One rule to respect: only `+`-prefixed files participate in routing, so a stray `Button.svelte` dropped into a routes folder is inert.
+
+## Load functions: universal versus server
+
+Data arrives through `load` functions, and the choice between the two flavors is the first real decision on every route:
+
+```ts
+// src/routes/blog/[slug]/+page.server.ts — server only
+import { error } from '@sveltejs/kit';
+import { db } from '$lib/server/database';
+
+export async function load({ params }) {
+  const post = await db.post.findUnique({ where: { slug: params.slug } });
+  if (!post) error(404, 'post not found');
+  return { post };
+}
+```
+
+```ts
+// src/routes/blog/+page.ts — runs on server AND in the browser
+import type { PageLoad } from './$types';
+
+export const load: PageLoad = async ({ fetch, parent }) => {
+  const { posts } = await parent();
+  const comments = await fetch(`/api/comments?ids=${posts.map((p) => p.id)}`);
+  return { comments: await comments.json() };
+};
+```
+
+The split is about secrets and physics. `+page.server.ts` runs only on the server: it may use database clients, private environment variables (Chapter 9's `PRIVATE_` prefix), and anything else that must never reach the browser — and during client-side navigation it runs as a call to your own server. `+page.ts` is *universal*: it runs on the server for the first request and in the browser for subsequent navigation, which is what makes offline-friendly, serverless-style navigation possible. Its `fetch` is instrumented — results are recorded so the server-rendered pass can reuse them. Both flavors' returns are merged into one `data` object; `parent()` lets a child load await its layout's data. When a page only needs markup, it simply has no load file at all.
+
+## Using load data
+
+The page receives everything the loaders returned through the props mechanism from Chapter 3 — there is no global store to consult:
+
+```svelte
+<!-- src/routes/blog/[slug]/+page.svelte -->
+<script lang="ts">
+  import type { PageProps } from './$types';
+
+  let { data }: PageProps = $props();
+</script>
+
+<svelte:head>
+  <title>{data.post.title}</title>
+</svelte:head>
+
+<article>
+  <h1>{data.post.title}</h1>
+  <p>{data.post.body}</p>
+</article>
+```
+
+`data` is a reactive `$props` entry, which matters more than it looks: when the route's data is invalidated — after a form action, after an explicit `invalidate` — the loaders re-run and `data` updates *in place*, and your template re-renders through the ordinary Chapter 2 machinery. The `PageProps` type comes from `./$types`, generated per-route by the compiler, so `data.post` is fully typed with no manual interface between the loader and the page. Keep the discipline of reading route data through `data` rather than importing shared state for page content; it is what lets SvelteKit prerender, refetch, and stream a page's data correctly.
+
+## API routes with +server.ts
+
+When a URL should answer with data instead of a page, `+server.ts` exports HTTP verb handlers:
+
+```ts
+// src/routes/api/subscribe/+server.ts
+import { json } from '@sveltejs/kit';
+
+export async function GET({ url }) {
+  const email = url.searchParams.get('email');
+  return json({ ok: Boolean(email) });
+}
+
+export async function POST({ request }) {
+  const body = await request.formData();
+  const email = String(body.get('email') ?? '');
+  if (!email.includes('@')) {
+    return json({ ok: false, problem: 'bad email' }, { status: 400 });
+  }
+  return json({ ok: true }, { status: 201 });
+}
+```
+
+Each handler receives a standard `Request`-shaped event — `url`, `request`, `params`, `cookies`, `locals` — and returns a standard `Response`, with `json()` as the convenient wrapper. A `+server.ts` next to a `+page.svelte` serves that route's data directly, which is how you build endpoints mobile apps or scripts can call while the same route stays a page in the browser. This is also the natural home for webhooks and OAuth callbacks. One boundary to respect from Chapter 6: anything imported from `$lib/server/` is guaranteed server-only — the compiler turns an accidental client import into a build error rather than a leaked secret.
+
+## Form actions and use:enhance
+
+SvelteKit's most opinionated feature is that forms work without JavaScript, because the framework treats POST as a first-class route capability. A `+page.server.ts` can export `actions`:
+
+```ts
+// src/routes/newsletter/+page.server.ts
+import { fail } from '@sveltejs/kit';
+
+export const actions = {
+  default: async ({ request }) => {
+    const data = await request.formData();
+    const email = String(data.get('email') ?? '');
+    if (!email.includes('@')) {
+      return fail(400, { email, problem: 'that is not an email' });
+    }
+    await subscribe(email);
+    return { success: true };
+  }
+};
+```
+
+```svelte
+<!-- src/routes/newsletter/+page.svelte -->
+<script lang="ts">
+  import { enhance } from '$app/forms';
+  import type { PageProps } from './$types';
+
+  let { form }: PageProps = $props();
+</script>
+
+<form method="POST" use:enhance>
+  <input name="email" value={form?.email ?? ''} />
+  {#if form?.problem}<p class="error">{form.problem}</p>{/if}
+  {#if form?.success}<p>check your inbox</p>{/if}
+  <button>subscribe</button>
+</form>
+```
+
+The action runs on the server, and its return value arrives in the page's `form` prop — including `fail(400, …)`, which reports a failure without throwing. With no JavaScript, the browser POSTs, the server re-renders the page with `form` populated, and the user sees the result. With `use:enhance`, the same form is intercepted: the POST becomes a fetch, the action result is applied, and — crucially — the page's load functions and the `form` prop update reactively, exactly as if a full submission had happened. Named actions (`?/resubscribe`) let one page host several. This is progressive enhancement as architecture, not decoration: the server path is the real path, and `enhance` is an optimization layered on top.
+
+## Invalidation, depends, and hooks
+
+Because `data` is reactive, refresh becomes explicit and cheap. After a form action, SvelteKit automatically invalidates the affected load functions; anywhere else, you call `invalidate`:
+
+```svelte
+<script>
+  import { invalidate } from '$app/navigation';
+
+  async function refreshBalance() {
+    await invalidate('app:balance');
+  }
+</script>
+```
+
+Loads declare interest with `depends('app:balance')`, a custom dependency string; `invalidate('app:balance')` re-runs every load that declared it, and `invalidateAll()` re-runs everything for the current route. The mechanism solves staleness without a global refetch — you name what changed, the framework finds who cares.
+
+The last piece wraps every request: `hooks.server.ts` exports a `handle` function through which all traffic flows:
+
+```ts
+// src/hooks.server.ts
+import type { Handle } from '@sveltejs/kit';
+
+export const handle: Handle = async ({ event, resolve }) => {
+  const token = event.cookies.get('session');
+  event.locals.user = token ? await getUser(token) : null;
+  return resolve(event);
+};
+```
+
+`event.locals` is your per-request scratchpad — populated here, readable in every load, action, and `+server.ts` handler — and it is the correct home for request-scoped identity. Recall Chapter 6's warning about shared state in a server context: `locals` is the per-request replacement. Typed through `app.d.ts`, it closes the loop: the page gets its data from load, load gets its user from locals, and locals gets its user from the one place every request passes through.
+
+## Key takeaways
+
+- SvelteKit's contract is its `+` files: `+page.svelte` renders, `+page.ts` and `+page.server.ts` load, `+server.ts` answers HTTP, `+layout.svelte` wraps, `+error.svelte` catches.
+- Server loads may touch databases and secrets; universal loads run on both sides and power client-side navigation — pick per route, not per project.
+- Load data arrives as reactive `$props` typed by generated `PageProps`, and updates in place when invalidated.
+- Form actions with `fail()` and the `form` prop make POST work without JavaScript; `use:enhance` layers the fetch-based version on top without changing the contract.
+- `invalidate` and `depends` name what changed instead of refetching the world, and `hooks.server.ts` plus `locals` give every request a clean, per-user identity.
+
+The app is built. What remains is shipping it — adapters, environments, tests, and accessibility — which is where the book goes next.

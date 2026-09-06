@@ -1,0 +1,20 @@
+---
+import ThemeToggle from './ThemeToggle.astro';
+
+interface Props {
+  series?: string;
+  color?: string;
+}
+
+const { series = 'Unified Book', color = '#5628b4' } = Astro.props;
+---
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/"><span class="fe" style="color: {color}">UB</span> · {series}</a>
+    <div class="topbar-actions">
+      <button class="search-btn" id="search-btn" type="button" aria-label="Search chapters">🔍</button>
+      <ThemeToggle />
+    </div>
+  </div>
+</div>

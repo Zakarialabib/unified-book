@@ -1,0 +1,187 @@
+---
+order: 7
+title: "Styling & Assets"
+subtitle: "scoped CSS, Tailwind, and astro:assets"
+description: "Scoped styles by default, global styles on purpose, Tailwind when you want it, and astro:assets for images that resize, reformat, and never break layout."
+level: "Intermediate"
+---
+
+Styling is where component models usually leak. Global CSS collides, frameworks ship runtime style solutions, and images break layouts in ways that only show on your colleague's phone. Astro's approach is deliberately boring: styles in a component are scoped to that component at compile time, global styles are global because you said so, and images go through a build step that resizes, reformats, and refuses to ship a layout-breaking photo. Boring here is a compliment — none of this needs a runtime, which keeps the zero-JS budget from Chapter 1 intact.
+
+## Scoped styles by default
+
+A `<style>` tag in an `.astro` file is scoped: its selectors apply only to the markup in that same file. The mechanism is worth seeing, because it explains every surprise later. Astro rewrites both sides at compile time — each element in the template gets a generated attribute, and each selector gains a match on it:
+
+```astro
+---
+// src/components/Note.astro
+interface Props {
+  tone?: "info" | "warn";
+}
+const { tone = "info" } = Astro.props;
+---
+<p class="note">Heads up: builds fail loudly now.</p>
+<style>
+  .note {
+    border-left: 3px solid steelblue;
+    padding-left: 0.75rem;
+  }
+</style>
+```
+
+```html
+<p class="note" data-astro-cid-3jf2acqk>Heads up: builds fail loudly now.</p>
+<style>
+  .note[data-astro-cid-3jf2acqk] {
+    border-left: 3px solid steelblue;
+    padding-left: 0.75rem;
+  }
+</style>
+```
+
+Nothing is renamed — your class names survive to the browser intact, so devtools stay readable — but the selector cannot match anything outside the component, because only this component's elements carry that `cid`. Two components can both define `.note` on the same page and neither sees the other. The scoping is a *feature of the file*, not of where the style ends up: Astro hoists all component styles into the page's CSS at build, and the attribute is what keeps the hoisted rules from bleeding into each other.
+
+## Escaping scope with :global and is:global
+
+Scoped styles have a blind spot by design: they cannot reach markup they don't own. A scoped `.card h2` will not style a heading rendered by a child component or an island — each file's styles are scoped to that file, so the parent's selectors never see the child's DOM. When you genuinely need to reach across, say so explicitly:
+
+```astro
+---
+// src/pages/blog/[slug].astro
+---
+<article class="prose">
+  <slot />   <!-- markdown-rendered HTML, no component of yours owns it -->
+</article>
+<style>
+  /* every h2 inside .prose, however deep it came from */
+  .prose :global(h2) {
+    margin-top: 3rem;
+    font-size: 1.5rem;
+  }
+</style>
+
+<style is:global>
+  .prose pre {
+    background: #1a1a2e;
+    border-radius: 6px;
+  }
+</style>
+```
+
+The `:global(...)` wrapper leaves that one selector unscoped, anchored to your scoped `.prose` so it still cannot escape the component. For a whole stylesheet that should be global — a markdown theme, a print sheet — `is:global` on the style tag opts the entire block out.
+
+The asymmetry answers a question that confuses everyone at first: *why don't my styles leak into imported components?* Because scoping is per file — the parent's rules get a `cid` the child's elements don't carry. That is the correct behavior most of the time; `:global` is how you override it locally, and a global reset sheet in `src/styles` is how you handle the cases that were never component work to begin with.
+
+## Cascading order and specificity surprises
+
+Scoping does not repeal the cascade, and two details bite everyone once. First, *order*: component styles are bundled into the page in the order components render, and when two rules of equal specificity target the same element, the later one wins — so a page-level `<style>` beats a component's rule for an element the page itself owns, and import order silently arbitrates everything else. Second, *specificity*: the scoping attribute is an attribute selector, which adds a class-level bump, so a scoped `.note` is slightly more specific than a global `.note` — usually what you want, occasionally baffling when a global utility loses to a scoped rule it "should" beat.
+
+```css
+/* Equal intent, unequal fate:
+   global utility           .text-lg { font-size: 1.125rem; }        (0,1,0)
+   scoped component rule    .meta[data-astro-cid-x] { ... }          (0,2,0)
+   The scoped rule wins on specificity, regardless of order. */
+```
+
+The habits that keep this tractable: keep selectors flat — one class, no descendant chains — so specificity stays uniform and order stops mattering; put overrides where the element lives rather than reaching in from a parent; and treat `!important` as a review comment, not a fix. If a styling conflict feels like a fight, the real problem is usually that two components are styling the same element, and the fix is a slot or a prop, not a heavier selector.
+
+## Tailwind, when you want it
+
+Astro has no styling religion, and Tailwind slots in cleanly when your fingers already speak it. With Tailwind 4, the setup is the Vite plugin — no `tailwind.config.js`, no PostCSS wiring:
+
+```js
+// astro.config.mjs
+import { defineConfig } from "astro/config";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  vite: {
+    plugins: [tailwindcss()],
+  },
+});
+```
+
+```css
+/* src/styles/global.css */
+@import "tailwindcss";
+```
+
+Import that stylesheet once in `BaseLayout` and utility classes work in every component. You will still meet the older `@astrojs/tailwind` integration in tutorials — it is the Tailwind 3 path, and on Tailwind 4 the Vite plugin is the current route. The scoped-style machinery from the first section composes rather than conflicts: utilities in markup, a small `<style>` block for the few genuinely component-specific rules, and `:global()` for the markdown content Tailwind cannot reach with plain classes. The honest trade to weigh: utilities keep decisions co-located and delete dead CSS automatically, while scoped plain CSS keeps components portable — and neither should you push the decision until a choice starts hurting.
+
+## Images with astro:assets
+
+Images are the heaviest thing most pages ship, and `astro:assets` turns them into a build concern. Put source images in `src/assets`, and the `Image` component resizes and reformats at build time:
+
+```astro
+---
+// src/pages/index.astro
+import { Image } from "astro:assets";
+import hero from "../assets/harbor.jpg";
+---
+<Image
+  src={hero}
+  alt="Harbor at dawn"
+  width={1200}
+  height={630}
+  format="avif"
+/>
+```
+
+The build emits a 1200-pixel AVIF, sets `width` and `height` attributes so the browser reserves space before the image loads — the end of layout shift — and passes through the alt text untouched. Local imports know their intrinsic dimensions automatically; remote images can pass explicit dimensions or use `inferSize` to measure them at build. The `public` directory still exists for images you want served byte-for-byte, but anything that would benefit from resizing belongs in `src/assets`. Coming from a hand-rolled image pipeline — a script, a Makefile, a shrine to `srcset` — this replaces the whole shrine with one component.
+
+## Responsive images
+
+One image per `<img>` is a fixed cost charged to every device; responsive images let the browser choose. Pass `widths` and `sizes`, and the build produces multiple variants while the component emits the `srcset` and `sizes` attributes:
+
+```astro
+---
+import { Image, Picture } from "astro:assets";
+import hero from "../assets/harbor.jpg";
+---
+<Image
+  src={hero}
+  alt="Harbor at dawn"
+  widths={[400, 800, 1600]}
+  sizes="(min-width: 800px) 800px, 100vw"
+/>
+
+<Picture src={hero} alt="Harbor at dawn" formats={["avif", "webp"]} />
+```
+
+The phone downloads the 400-pixel variant; the desktop grabs the 1600; the `sizes` expression is you telling the browser how wide the image will render, which is what lets it choose well. When you want format fallbacks — AVIF where supported, WebP beneath it, JPEG under that — the `Picture` component layers them with a `<source>` per format.
+
+The discipline that makes this worth it: art-direction decisions belong here, at the component, where the layout context lives. A hero banner and a thumbnail of the same source image are two `Image` calls with different `widths`, not two pre-exported files drifting out of sync in a folder.
+
+## Fonts without the jank
+
+Fonts have their own failure mode: the text is ready, the font is not, and the browser decides whether to show nothing or the wrong font. The fix is a stack of three small deliberate choices — self-host the files, preload the one that matters, and swap rather than block:
+
+```astro
+---
+// src/layouts/BaseLayout.astro — preload link plus the font sheet
+---
+<head>
+  <link rel="preload" href="/fonts/newsreader-400.woff2" as="font" type="font/woff2" crossorigin />
+</head>
+<style is:global>
+  @font-face {
+    font-family: "Newsreader";
+    src: url("/fonts/newsreader-400.woff2") format("woff2");
+    font-weight: 400;
+    font-display: swap;
+  }
+</style>
+```
+
+`font-display: swap` renders the fallback immediately and swaps when the real font lands — the visitor reads your words on the first paint, and the typeface refines a beat later. Preload only the one or two weights a first paint actually needs. Subset the files (a Latin subset of a body font is typically a third of the full size), and self-host rather than loading from a third-party origin — one fewer DNS lookup and no extra privacy policy. Astro's experimental Fonts API automates this pattern, but the mechanics above are stable, portable, and worth knowing regardless of which layer does the work.
+
+## Key takeaways
+
+- Component `<style>` blocks are scoped per file by generated attributes, so class names survive to devtools while collisions become impossible.
+- Scoped styles cannot reach child or island markup by design; `:global(...)` for one selector or `is:global` for a block is the explicit opt-out.
+- The cascade still applies: equal-specificity ties go to the later rule in bundle order, and the scoping attribute adds a class-level specificity bump.
+- Tailwind 4 installs as a Vite plugin with a single `@import` — the `@astrojs/tailwind` integration is the legacy Tailwind 3 path.
+- `astro:assets` Image and Picture components resize, reformat, and set dimensions at build; `widths` plus `sizes` is how responsive images stop overcharging phones.
+- Self-host fonts, preload the first-paint weight, and use `font-display: swap` so text paints immediately and type arrives when it arrives.
+
+Pages now look right and load fast — but navigation still costs a full page load, and forms still cost a round trip. The client router and actions fix both without turning the site into an SPA.

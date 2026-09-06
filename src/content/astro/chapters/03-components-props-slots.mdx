@@ -1,0 +1,187 @@
+---
+order: 3
+title: "Components, Props & Slots"
+subtitle: "the .astro component model"
+description: "Astro components are HTML-generating functions with a TypeScript frontmatter: props typed with interfaces, composition through slots, and a rendering model that disappears at runtime."
+level: "Foundations"
+---
+
+Chapter 1 called an `.astro` file an HTML-generating function, and that is true of components too — with one difference that changes everything about how you design them: after the build, the component *disappears*. There is no component tree in the browser, no reconciliation, no component state to manage. What remains is HTML. That single fact pushes Astro's component model toward a shape you may not have written before: components are closer to stamped-out parts in a factory than to objects in a running program. This chapter covers the three tools that model works with — typed props, slots, and the discipline of knowing which one a situation calls for.
+
+## Components as HTML functions
+
+A component is a `.astro` file in `src/components` by convention, PascalCase by stronger convention, used as a tag:
+
+```astro
+---
+// src/components/Stat.astro
+interface Props {
+  label: string;
+  value: string;
+}
+
+const { label, value } = Astro.props;
+---
+<div class="stat">
+  <dt>{label}</dt>
+  <dd>{value}</dd>
+</div>
+```
+
+Used on a page as `<Stat label="Uptime" value="99.98%" />`, it produces one definition list row per instance and nothing else.
+
+There is no registration, no context, no import graph visible to the browser — `Stat` exists only during the build, produces one `<div>` per use, and evaporates. If you have written Rust, the feel is closer to a macro expanding than to an object being constructed. The upside of components that do not exist at runtime is freedom from a whole category of problems: no accidental state sharing between pages, no hydration bugs from duplicated trees, no render loops. The discipline it demands is the flip side: anything dynamic must either happen at build time, or be an island — Chapter 5's subject — or be a script, and the component API should make it obvious which of the three a caller is getting.
+
+## Props with TypeScript
+
+Props are passed as attributes and read from `Astro.props`, and the type comes from an interface named `Props` that Astro understands by convention:
+
+```astro
+---
+// src/components/Alert.astro
+interface Props {
+  severity: "info" | "warning" | "error";
+  message: string;
+  dismissible?: boolean;
+}
+
+const { severity, message, dismissible = false } = Astro.props;
+---
+<div class={`alert alert-${severity}`}>
+  <p>{message}</p>
+  {dismissible && <button aria-label="Dismiss">×</button>}
+</div>
+```
+
+Three habits make props pleasant at any project size. Destructure immediately, giving required fields a type error when missing and optional fields a default, so callers only pass what they mean to. Use union types for closed sets — `"info" | "warning" | "error"` turns a typo into a build failure instead of a mystery class name. And keep `interface Props` as the single source of truth, because `astro check` (TypeScript over the whole project) validates every call site against it. A prop passed from a dynamic route's `props` object is checked the same way, which means the census in Chapter 2 and the component contract here join into one continuous type-checked pipeline from data to markup.
+
+## Slots and composition
+
+Props are for data. Slots are for markup — and keeping the two apart is the component model's central design skill. A slot is a hole in the component; whatever the caller nests inside the tag lands there:
+
+```astro
+---
+// src/components/Card.astro
+interface Props {
+  href: string;
+}
+const { href } = Astro.props;
+---
+<a class="card" href={href}>
+  <slot />
+</a>
+```
+
+The caller nests anything it likes inside the tag; the card's only job is the anchor and the hole:
+
+```astro
+---
+// used on a page
+import Card from "../components/Card.astro";
+import Badge from "../components/Badge.astro";
+---
+<Card href="/blog/servers">
+  <h3>Servers, all the way down</h3>
+  <p>Why we moved the render to the build machine.</p>
+  <Badge kind="new" />
+</Card>
+```
+
+The caller passed a heading, a paragraph, and another component — arbitrary markup, styled by the caller's own CSS, and the card never needed to know any of it. Try to imagine the prop version: a `title` string prop works, but the paragraph, the badge, the freedom to reorder? You would invent an escape hatch, then another. The escape hatch already exists, and it is the slot. If a component needs *content* rather than *configuration*, it is asking for a slot.
+
+## Named and fallback slots
+
+Real components have more than one hole. `name="footer"` on the caller's markup fills a `<slot name="footer" />` in the component; any slot with default content inside the tag keeps that content when the caller leaves it empty:
+
+```astro
+---
+// src/components/PostCard.astro
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+<article class="post-card">
+  <h3>{title}</h3>
+  <div class="body"><slot /></div>
+  <footer class="meta">
+    <slot name="meta"><span>Unpublished draft</span></slot>
+  </footer>
+</article>
+```
+
+```astro
+---
+import PostCard from "../components/PostCard.astro";
+import AuthorChip from "../components/AuthorChip.astro";
+---
+<PostCard title="Static is a feature">
+  <p>The default slot takes the body…</p>
+  <AuthorChip slot="meta" name="Rin" />
+</PostCard>
+```
+
+The fallback is not a prop default for strings — it is a whole chunk of markup, and it renders only when the caller provides nothing for that slot. This pairs naturally with layouts: a `DocsLayout` can define named slots for `header` and `sidebar` and a default slot for the page body, and every page using it opts into exactly the regions it has. Note the direction of knowledge flow: the component knows the *shape* of its regions, the caller knows the *content*, and neither knows more than it should.
+
+## Passing markup, not just strings
+
+Here is the thing that isn't a thing: Astro has no mechanism for passing a rendered component or a template through a prop. Props are build-time values; markup is a slot. Coming from React, where `children` and render-props are the whole game, the temptation is to look for the equivalent — there isn't one, and the slot system is the equivalent, deliberately.
+
+```astro
+---
+// src/components/Callout.astro
+interface Props {
+  kind?: "tip" | "warning";
+}
+const { kind = "tip" } = Astro.props;
+---
+<aside class={`callout callout-${kind}`}>
+  <slot />
+</aside>
+```
+
+```astro
+---
+// src/pages/guide.astro — lists, code, other components: all fine in a slot
+import Callout from "../components/Callout.astro";
+---
+<Callout kind="warning">
+  <p>Checklist for deleting a table:</p>
+  <ul>
+    <li>Snapshot the volume</li>
+    <li>Announce in <code>#deploys</code></li>
+  </ul>
+</Callout>
+```
+
+There is one escape hatch worth knowing, if only to recognize it in the wild: inside a component, `Astro.slots.render("default")` returns the slot's content as an HTML string, which is how wrapper libraries forward content to scripts or transform it before emitting. Treat it as plumbing, not as a design pattern — the moment a component's prop list includes something like `bodyHtml`, you have reinvented the slot badly. The rule survives contact with real projects: **data crosses props; markup crosses slots**, and components that respect the boundary stay composable for years.
+
+## Component APIs that age well
+
+The rendering model makes component design simpler than in SPA frameworks, because a component's entire behavior is visible in its own file. A few habits that hold up. Prefer slots over boolean props: `condensed` and `hideFooter` are each a future regret, while named slots let callers bring their own content and delete themselves when unused. Type everything, including the `Props` interface even when it has one field — the interface is the documentation that `astro check` enforces. Keep side effects at the edges: a component that fetches in its frontmatter is honest about being a build-time operation, but a component that fetches *and* formats *and* renders is three components wearing a trench coat, and its callers will re-render everything to change anything.
+
+```astro
+---
+// src/components/Quote.astro — small, typed, slotted: the whole API is visible
+interface Props {
+  attribution?: string;
+}
+const { attribution } = Astro.props;
+---
+<figure class="quote">
+  <blockquote><slot /></blockquote>
+  {attribution && <figcaption>— {attribution}</figcaption>}
+</figure>
+```
+
+That component is a good endpoint: one optional prop, one slot, no state to guess at. When a component grows past roughly a screen, split it by region — the slot boundaries you already have are natural seam lines. And when a component genuinely needs interactivity, do not grow logic into it; make it the static shell around an island, which keeps the zero-JS default intact and keeps this chapter's model clean. Islands have rules of their own, and they are next.
+
+## Key takeaways
+
+- Astro components are HTML-generating functions that exist only at build time, so their design space is build-time composition, not runtime state.
+- Declare `interface Props`, destructure `Astro.props` with defaults, and use union types so every call site is checked against the contract at build.
+- Slots are for markup and props are for data — if a caller is passing content, it wants a slot, and there is deliberately no way to pass rendered markup as a prop.
+- Named slots with fallback content give components multiple optional regions, which is how layouts offer headers, sidebars, and bodies without boolean flags.
+- Small, typed, slotted components with visible APIs age well; grow interactivity by wrapping islands, never by accumulating flags and lifecycle logic.
+
+One special kind of content deserves its own machinery, though — the markdown and MDX that make up blogs and docs. Next chapter: content collections, the feature the rest of this book leans on.

@@ -1,0 +1,176 @@
+---
+order: 2
+title: "Borrowing & Lifetimes"
+subtitle: "references without the fear"
+description: "References let you use a value without owning it. The borrow checker enforces two simple rules over them, and lifetimes are just the notation that makes those rules checkable when functions and structs get involved."
+level: "Foundations"
+---
+
+Chapter 1 left you with an awkward reality: pass a `String` to a function and you lose it. Real programs need to *use* values without consuming them — read a config from three call sites, sort a vector in place, write a function that works on any slice it's handed. The mechanism for that is the **reference**, and the part of the compiler that checks references is the **borrow checker** — the component Rust's reputation is built on, for better and for worse.
+
+This chapter gives you the actual rules, not folklore. They are shorter than you expect, and once you can state them precisely, most "why won't this compile" mysteries turn into straightforward arithmetic.
+
+## References, and the two rules
+
+A reference is a pointer with a compile-time contract. You create one with `&` (shared) or `&mut` (exclusive), and the contract is:
+
+> At any given time, a value may have **any number of shared references** (`&T`), **or exactly one exclusive reference** (`&mut T`) — never both.
+
+That's it. That is the whole borrow checker. Shared references are read-only views you can hand out freely. An exclusive reference is a promise, enforced by the compiler, that nothing else can read or write the value while it exists.
+
+Why this rule and not something laxer? Two of the worst bugs in systems programming die exactly at this line. A **data race** requires two pointers to the same memory where at least one writes and neither is synchronized — the rule makes that combination unrepresentable. **Iterator invalidation** — mutating a collection while looping over it — is the same crime in miniature:
+
+```rust
+let mut v = vec![1, 2, 3];
+for x in &v {
+    // v.push(*x * 10);  // error: cannot borrow `v` as mutable
+                          // while `v` is borrowed as immutable
+    println!("{x}");
+}
+```
+
+`push` may reallocate the buffer, which would leave the loop's reference pointing at freed memory. In C++ this is undefined behavior you discover in production; in Rust it is a compile error with a message that points at both parties.
+
+The rule is symmetric and fair: hold as many readers as you like, or hold one writer, and the compiler arbitrates by *region* — a borrow lasts from where it is created to its last use, not merely to the end of the scope. This is **non-lexical lifetimes**, and it is why the following compiles:
+
+```rust
+let mut s = String::from("count");
+let len = s.len();      // shared borrow starts...
+println!("{len}");      // ...and ends here: last use of the borrow
+
+s.push('!');            // fine: no shared borrow is alive anymore
+```
+
+## Borrowing in practice
+
+Mutating through an exclusive reference requires the *owner* to be mutable, and there can be only one `&mut` at a time:
+
+```rust
+fn append_world(s: &mut String) {
+    s.push_str(", world");
+}
+
+fn main() {
+    let mut s = String::from("hello");
+    append_world(&mut s);
+    println!("{s}"); // hello, world
+}
+```
+
+Notice what the signature `&mut String` communicates. The function borrows — it can mutate, but it does not own, so no cleanup happens when it returns, and the caller keeps its value. Compare that with `fn append_world(mut s: String)`, which would take ownership and destroy the caller's copy. Choosing between them is an API design decision you now make consciously, on every function.
+
+Here is the classic triple-borrow puzzle, which reads like the rulebook narrating itself:
+
+```rust
+let mut scores = vec![8, 6, 9];
+
+let first = &scores[0];        // shared borrow of scores
+scores.push(10);               // error: needs exclusive borrow,
+                               // but `first` is still alive
+println!("{first}");
+```
+
+Reorder the lines so the shared borrow's last use comes before the mutation, and everything is fine:
+
+```rust
+let mut scores = vec![8, 6, 9];
+let first = &scores[0];
+println!("{first}");           // shared borrow ends here
+scores.push(10);               // fine now
+```
+
+When the compiler *does* reject overlapping borrows inside one function, the fixes are almost always one of: reorder statements so borrows don't overlap, shrink the borrow's lifetime by introducing an inner block, restructure so you don't hold a reference across the mutation, or — when the pattern is genuinely two disjoint parts of one collection — split the borrow explicitly, which chapter 7 shows how to do for good reason.
+
+## Slices: borrowing a view
+
+A **slice** is a reference to a contiguous run of elements — a pointer plus a length. It is how Rust says "a borrowed view into some buffer," and it is everywhere once you learn to see it: `&str` is a slice of string bytes, `&[T]` is a slice of a `Vec` or array.
+
+```rust
+fn first_word(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("")
+}
+
+fn main() {
+    let sentence = String::from("borrowing beats owning");
+    let word = first_word(&sentence); // &String coerces to &str
+    println!("{word}");
+}
+```
+
+Two things are happening here. `&sentence` is a `&String`, but the function asks for `&str`, and Rust **coerces** automatically — deref coercion, one of the few invisible conversions in the language, and the reason APIs take `&str` rather than `&String`. The second thing: `word` borrows from `sentence`, so as long as `word` is alive, `sentence` cannot be mutated or dropped. The type system has turned "this string view depends on that string" into something the compiler tracks for you.
+
+The same works for any collection:
+
+```rust
+let numbers = [10, 20, 30, 40];
+let mid: &[i32] = &numbers[1..3]; // view of elements 1 and 2
+assert_eq!(mid, &[20, 30]);
+```
+
+Slices are why Rust code takes `&[T]` instead of `&Vec<T>`: the slice accepts vectors, arrays, and sub-ranges alike, and the function never needs to know or care which.
+
+## Lifetimes: the notation for "how long"
+
+Every reference has a **lifetime** — the region of code during which the borrow is valid. Usually you never write it: the compiler infers it locally. You must write annotations only when references cross a function boundary in a way the compiler cannot guess, and the syntax is parameter-like:
+
+```rust
+fn longest<'a>(x: &'a str, y: &'a str) -> &'a str {
+    if x.len() > y.len() { x } else { y }
+}
+```
+
+Read `'a` not as a *thing* but as a **relationship**: "the returned reference is valid for exactly as long as *both* inputs are." The signature makes a promise the compiler can check at every call site — and, crucially, it makes the function honest about what it can return. Without the annotation, the compiler cannot know whether the result borrows from `x`, from `y`, or from neither, because that depends on a runtime branch.
+
+A common first confusion: lifetimes do not *change* how long anything lives. They describe and enforce. The input values determine what is possible; the annotations let the compiler verify your function stays inside those bounds.
+
+Structs that hold references must declare the same dependency:
+
+```rust
+struct Excerpt<'a> {
+    part: &'a str,
+}
+
+let novel = String::from("call me ishmael. some years ago...");
+let first = novel.split('.').next().unwrap();
+let excerpt = Excerpt { part: first };
+// `excerpt` cannot outlive `novel` — the compiler proves it
+println!("{}", excerpt.part);
+```
+
+`Excerpt<'a>` means: an instance of this struct borrows from something, and while the instance exists, that something stays alive. This is why "self-referential structs" are famously hard in Rust — a struct holding a reference into itself would have to outlive itself, and the type system says no. The ecosystem answer is ownership-based (`String` fields instead of `&str`) or compile-time checked pointers like `ouroboros`/`self_cell` when you truly need it.
+
+## Elision: why you rarely write lifetimes
+
+If every function needed annotations, nobody would use the language. In practice, the compiler applies deterministic **elision rules** that write them for you: each reference parameter gets its own lifetime; if there is exactly one input lifetime, it is assigned to every output; and if a method takes `&self` or `&mut self`, its lifetime is assigned to all outputs. That is why these need no annotations:
+
+```rust
+fn first_word(s: &str) -> &str { /* ... */ }              // one input -> output borrows it
+impl Excerpt<'_> {
+    fn announce(&self) -> &str { self.part }              // &self -> output borrows self
+}
+```
+
+You write `'a` when the rules would guess wrong — typically when there are two or more reference inputs and the output could borrow from either. The one lifetime you should recognize but rarely write is `'static`: it means "this reference is valid for the entire program run," which is true of string literals (they live in the binary itself) and of values deliberately leaked with `Box::leak`.
+
+```rust
+let literal: &'static str = "embedded in the binary";
+```
+
+## A mental model that survives contact
+
+When the borrow checker rejects code, resist the urge to fight it blindly. Run this checklist instead:
+
+- **Who owns the value, and where does it die?** Sketch the owner's scope; every reference must end before it.
+- **Am I holding a borrow across an operation that needs exclusivity?** Shrink the borrow: move the use, add an inner scope, or clone at the boundary if the code is genuinely entangled.
+- **Is the conflict inside one function, or across a signature?** Inside a function, reordering usually fixes it. Across signatures, the fix is structural — usually returning owned data or splitting the function.
+- **Am I storing a reference where an owned value belongs?** Long-lived structs mostly want `String`, `Vec<T>`, and friends. Borrow fields are for views whose dependency you want checked.
+
+The borrow checker is not asking you to prove cleverness. It is asking you to state, in the types, who depends on whom — and then it checks that statement everywhere, forever, for free. Chapter 3 builds on that foundation: traits and generics are how you describe shared *behavior* with the same compile-time rigor.
+
+## Key takeaways
+
+- The borrow checker enforces one rule: any number of shared borrows, or exactly one exclusive borrow, never both at once.
+- Borrows end at their last use, not at the end of the scope — reorder statements and many "conflicts" dissolve.
+- Slices (`&str`, `&[T]`) are borrowed views into buffers; APIs that take slices accept more callers and own nothing.
+- Lifetime annotations describe relationships between references so the compiler can verify them; elision writes the common cases for you.
+- Structs holding references declare their dependencies in the type — and the compiler proves the dependency is honored.

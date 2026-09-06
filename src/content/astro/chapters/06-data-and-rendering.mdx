@@ -1,0 +1,156 @@
+---
+order: 6
+title: "Data & Rendering Modes"
+subtitle: "static, server, and everything between"
+description: "Fetch at build time, at request time, or in server islands; run static, SSR, or a mix. Rendering modes decide where your pages come from — and Astro lets you choose per page."
+level: "Intermediate"
+---
+
+So far every page in this book has been built ahead of time, and that is the default — but not a law. The real question underneath every rendering framework is: *who computes this HTML, and when?* For Astro the answer is per page: this one at build time, that one on every request, and — since Astro 5 — even a static page with one server-rendered island bolted into it. This chapter covers the dial and its detents: build-time fetching, the `prerender` flag, adapters, API endpoints, server islands, and the environment variables that keep secrets on the machine that needs them.
+
+## Where does a page come from?
+
+Three honest answers exist, and each has a cost profile. *Build time*: the HTML is computed once when you deploy, cached everywhere, served from a CDN, and stale until the next build. *Request time*: the HTML is computed on every request — always current, slower, and running on a server you pay to keep warm. *Hybrid*: the page is static and one piece of it is computed per request. Most frameworks pick one answer globally; Astro picks two defaults and a dial. The default is build time — the zero-JS, cache-forever pages of Chapters 1 through 5 — with `export const prerender = false` as the per-page escape hatch, and server islands as the fine-grained hybrid. Choosing per page is the point: a changelog and a stock ticker have no business obeying the same policy.
+
+## Fetching at build time
+
+Top-level `await` in the frontmatter is the build-time fetch, and you have used it since Chapter 1 without ceremony. The mechanics are worth one honest look, because the mental model differs from client-side fetching: the call runs once, during `astro build`, on the machine running the build.
+
+```astro
+---
+// src/pages/team.astro
+const res = await fetch("https://api.example.com/v2/team", {
+  headers: { Authorization: `Bearer ${Astro.env.CMS_TOKEN}` },
+});
+const team = await res.json();
+---
+<ul>
+  {team.map((member) => (
+    <li>{member.name} — {member.role}</li>
+  ))}
+</ul>
+```
+
+The token in that header is safe by construction — nothing in the frontmatter ever reaches a browser, a point this chapter returns to. The trade is staleness: the page shows the team as of the last deploy. For content that changes when you ship — posts, docs, pricing tiers — that is not a limitation but the correct cache policy. The operational habit is to make the build the update trigger: most CMSs offer a deploy webhook, so "content changed" becomes "rebuild," and the fetch's once-per-build cost amortizes over every request until the next one. If a page's data changes *without* a deploy, that is the signal it belongs in the next section.
+
+## prerender as a dial
+
+The escape hatch is one line. In Astro 5 there are two output modes: `static` (the default), where every page is prerendered unless it opts out, and `server`, where the default flips. The flag lives in the page:
+
+```astro
+---
+// src/pages/rates.astro
+export const prerender = false;
+
+const res = await fetch("https://api.example.com/v2/rates");
+const rates = await res.json();
+---
+<p>EUR/USD as of {new Date().toISOString()}: {rates.eurUsd}</p>
+```
+
+That page is now computed per request, forever current, and it needs an *adapter* to exist at all — a package that teaches Astro how to run on a given platform:
+
+```js
+// astro.config.mjs
+import { defineConfig } from "astro/config";
+import node from "@astrojs/node";
+
+export default defineConfig({
+  output: "static",
+  adapter: node({ mode: "standalone" }),
+});
+```
+
+The shape of this is worth savoring: `output: "static"` with an adapter installed means every page is a file *except* the ones that ask otherwise — the hybrid behavior older frameworks needed a special mode for. `prerender = true` on a server-output project works the same way in reverse. The adapter choice follows the host — Node for your own container, Vercel or Netlify or Cloudflare for their platforms — and it changes nothing about the page code, which is the point. A route that cannot be known at build time (Chapter 2's caveat) and data that changes without a deploy are the two honest reasons to flip the flag; anything else is usually a caching problem wearing a rendering-problem costume.
+
+## API endpoints
+
+Pages render HTML; endpoints return data, and in Astro they are the same kind of file. Export functions named after HTTP methods from any file in `src/pages`:
+
+```ts
+// src/pages/api/search.ts
+import type { APIRoute } from "astro";
+import { searchPosts } from "../../lib/search";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ url }) => {
+  const query = url.searchParams.get("q") ?? "";
+  return Response.json({ results: await searchPosts(query) });
+};
+
+export const POST: APIRoute = async ({ request }) => {
+  const body = await request.json();
+  // ...handle submission
+  return Response.json({ received: true });
+};
+```
+
+Naming the file `search.json.ts` instead serves `/api/search.json`, letting the extension carry the content type. One subtlety ties back to the dial: a `GET` endpoint *without* `prerender = false` is prerendered like a page — which is exactly right for a build-time search index snapshot, and exactly wrong for a live lookup. Non-`GET` methods require request-time rendering, full stop. Endpoints are also the escape hatch for things islands shouldn't do inline: an island that needs the search index should call an endpoint rather than ship the index as props, a boundary Chapter 5 drew for exactly this reason. For form handling specifically, though, there is a better tool than raw endpoints — actions — and they get their own stage in Chapter 8.
+
+## Server islands
+
+The hybrid deserves its own section, because Astro 5 made it a first-class mechanism. A *server island* is a server-rendered component embedded in an otherwise static page: the page ships from cache, and the island's HTML is computed per request and swapped in by a small script. Mark a component with `server:defer`, and mark the component itself as non-prerendered:
+
+```astro
+---
+// src/components/StockTicker.astro
+export const prerender = false;
+
+const quotes = await getQuotes();
+---
+<dl>
+  {quotes.map((q) => (
+    <div><dt>{q.symbol}</dt><dd>{q.price}</dd></div>
+  ))}
+</dl>
+```
+
+```astro
+---
+// src/pages/index.astro — a fully static page
+import StockTicker from "../components/StockTicker.astro";
+---
+<html lang="en">
+  <body>
+    <h1>Markets, mostly static</h1>
+    <StockTicker server:defer>
+      <p slot="fallback">Loading quotes…</p>
+    </StockTicker>
+  </body>
+</html>
+```
+
+The page's HTML — the entire marketing site around the ticker — is prerendered, cached, and served from the edge. The ticker is not: Astro injects a request for it after load, the named `fallback` slot renders meanwhile, and the finished HTML replaces it. The cache hit ratio of a static page and the freshness of a dynamic one, per component. Note what this replaces: the old options were "make the whole page dynamic to personalize one widget" or "ship the widget's data to the client and render it there." Server islands are also streamed sensibly — the response shell goes out immediately and slow per-request parts flush as they resolve, so the fallback pattern doubles as a loading state rather than a lie.
+
+## Environment variables and secrets
+
+Rendering modes decide where code runs, and where code runs decides which variables it may see. Astro follows the Vite convention with one rule that matters: variables prefixed `PUBLIC_` are exposed to client-side code; everything else is private, available only in server-side code — frontmatter, endpoints, actions, middleware — and never bundled for the browser:
+
+```bash
+# .env
+PUBLIC_SEARCH_URL=https://search.example.com
+STRIPE_SECRET_KEY=sk_test_abc123
+```
+
+```astro
+---
+// src/pages/checkout.astro — server-side only
+const key = Astro.env.STRIPE_SECRET_KEY;              // private: stays on the server
+const searchUrl = import.meta.env.PUBLIC_SEARCH_URL;   // public: usable anywhere
+---
+<SearchWidget client:visible endpoint={searchUrl} />
+```
+
+`Astro.env` is the server-side accessor — readable in frontmatter and endpoints without ceremony — while `import.meta.env` works anywhere and is the only way to reach a `PUBLIC_` variable from a client script or an island. The rule to internalize: assume anything reachable from island code or a client script is public, because the browser received it. Tokens for the CMS in the build-time fetch, keys for the payment API in the request-time page — all safe in `Astro.env` because that code runs on the machine you control. CI is the same story: set secrets in the pipeline, not in committed files, and Chapter 9 wires that up for real.
+
+## Key takeaways
+
+- Every page answers "who computes this HTML, and when?" — build time by default, per request with `prerender = false`, or per component with a server island.
+- Build-time fetching runs once per deploy on the build machine, making staleness a cache policy rather than a bug; wire deploys to content changes.
+- Astro 5 has two output modes, `static` and `server`, and an adapter enables per-request rendering; the adapter choice follows the host and leaves page code untouched.
+- Endpoints are pages that return data — `GET` can be prerendered, other methods cannot, and islands should call endpoints rather than carry payloads.
+- Server islands give a static page a dynamic component: `server:defer` plus a fallback slot buys per-request freshness at per-component cost.
+- `PUBLIC_`-prefixed variables reach the browser; everything else in `Astro.env` is server-only, and anything an island can read should be assumed public.
+
+The rendering dial is set, the data sources are wired. What is left is the part visitors actually see first — the styling and the images — and Astro has opinions there too.

@@ -1,0 +1,142 @@
+---
+order: 1
+title: "The Svelte Way"
+subtitle: "a compiler, not a runtime"
+description: "Svelte is a compiler that writes your event listeners, DOM updates, and reactive plumbing at build time — then disappears. This chapter builds the mental model for Svelte 5, where reactivity is language, not library."
+level: "Foundations"
+---
+
+Every frontend framework answers the same question: when your data changes, how does the view find out? React's answer is a runtime — render the tree into a virtual DOM, diff it against the previous render, patch the differences. Vue's answer is proxies that intercept every read and write; Angular's is a scheduler walking a dependency graph of its own. Each of these answers ships machinery to the browser, and the browser loads it, parses it, and runs it on every interaction for the life of the app. Svelte's answer is different: **the framework is a compiler.** You write components, a build step turns them into small, direct JavaScript that updates the DOM exactly where needed, and at runtime there is almost nothing left to load.
+
+That one design decision explains most of what follows in this book: why components are files, why reactivity looks like language rather than library calls, why bundles stay small, and where the tradeoffs land. This chapter builds that mental model before we go deep on any syntax.
+
+## The framework paradox
+
+A framework earns its place by solving real problems. It gives you components to compose, a declarative mapping from state to UI, and a disciplined path from event to update. Writing those by hand means `addEventListener` bookkeeping, string templating, and update code that drifts out of sync with the markup it serves — problems nobody should solve fresh in every project.
+
+But there is a paradox hiding in the usual implementations. Nearly everything a framework does at runtime is *determinable at build time*. Which element listens to which event, which text nodes depend on which values, which parts of the tree change together — the compiler can see all of it in your source. A runtime framework re-derives those facts on every render, on every user's machine, forever. That is the paradox: we ship a general-purpose interpreter to the browser when a specific-purpose program could be generated ahead of time. Svelte takes the second path — do the general work once, during the build, and ship only the result.
+
+## A compiler that writes your boilerplate
+
+The quickest way to feel the difference is the smallest interesting component: a counter. First, the React you already know:
+
+```jsx
+// React: describe the tree; the runtime reconciles it
+import { useState } from 'react';
+
+export default function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <button onClick={() => setCount(count + 1)}>
+      clicked {count} times
+    </button>
+  );
+}
+```
+
+Nothing is wrong with this code, and that is the point — it is perfectly ordinary. Now the same component in Svelte:
+
+```svelte
+<!-- Counter.svelte: state declared, markup templated -->
+<script>
+  let count = $state(0);
+</script>
+
+<button onclick={() => count++}>
+  clicked {count} times
+</button>
+```
+
+Same shape, same behavior — and no reconciliation. When you build this file, the compiler generates an event listener wired to exactly one button and an update that rewrites exactly one text node. It wrote the boilerplate you would have written by hand in vanilla JavaScript, then removed itself from the bundle. That is the honest version of the phrase you may have heard: *Svelte is a compiler that disappears.*
+
+## Reactivity as language: runes
+
+The counter's `let count = $state(0)` is the whole philosophy in one line. `$state` is not a function you import; it is a compiler keyword. The `$` prefix marks it as something the compiler rewrites, and the rewrite attaches reactivity to the variable itself — when `count` changes, every part of the UI that reads it updates, with no subscriber lists for you to maintain.
+
+Svelte 5 has a handful of these keywords, called *runes*: `$state` declares mutable state, `$derived` declares values computed from it, `$effect` runs side effects after the DOM updates, `$props` receives what a parent passed in, and snippets make markup composable. Chapters 2 through 5 cover them properly; Chapter 1 only needs you to recognize the shape.
+
+One orienting note if you met Svelte before version 5: the old model made reactivity *implicit* — a plain top-level `let` was silently reactive, and a `$:` label computed values from it. Runes make the same machinery explicit and portable. Reactivity is now something you declare, in components and outside them, rather than something the compiler infers from where a variable sits. Everything in this book uses the runes syntax; the old forms are worth recognizing only so you can migrate away from them.
+
+At a glance, the whole vocabulary you will spend four chapters on:
+
+```svelte
+<script>
+  let count = $state(0);              // values that change
+  let doubled = $derived(count * 2);  // values computed from state
+  let { max = 10 } = $props();        // inputs from a parent
+
+  $effect(() => {
+    document.title = `count is ${count}`; // bridges to the outside world
+  });
+</script>
+```
+
+## Anatomy of a .svelte file
+
+A component is a single file with up to three sections:
+
+```svelte
+<script>
+  // logic: state, derived values, functions, imports
+  let name = $state('Ada');
+</script>
+
+<!-- markup: real HTML, extended with template syntax -->
+<h1>hello {name}</h1>
+<input bind:value={name} />
+
+<style>
+  /* styles: scoped to this component */
+  h1 {
+    color: orangered;
+  }
+</style>
+```
+
+Three things deserve notice. The markup is genuinely HTML — there is no JSX dialect to learn, and event attributes like `onclick` carry the DOM's own names. The braces in `{name}` are the only syntax you need to embed a value, and they are compiled away, not evaluated at runtime by an interpreter. And the styles are *scoped*: the compiler rewrites each selector so it can only match this component's elements, so one file's CSS cannot leak into another's. The sections use the language of their domain — JavaScript in the script, CSS in the style block — and everything between them stays honest HTML.
+
+## What the compiler emits
+
+Svelte's output is worth a look, because knowing what ships changes how you think about cost. A simplified sketch of what the counter compiles to:
+
+```js
+// greatly simplified: the shape of compiled Svelte
+import { template, open, text, set_text } from 'svelte/internal/client';
+
+export default function Counter(anchor) {
+  // count becomes a signal: a value plus a list of dependents
+  let count = $.signal(0);
+
+  const button = open(template(`<button>clicked <t> times</button>`), anchor);
+  const label = text(button);
+  set_text(label, () => `clicked ${count.value} times`);
+
+  button.addEventListener('click', () => (count.value += 1));
+}
+```
+
+The real output is denser and handles edge cases this sketch hides, but the shape is true to life. There is no virtual DOM and no diffing: the compiler already knows which text node depends on `count`, so the update touches exactly that node. This is why Svelte apps stay small — you pay for the features you use, once, in generated code, instead of carrying a runtime's entire surface area in the hope you might need it.
+
+## Where Svelte fits in your stack
+
+An honest word on tradeoffs: Svelte's ecosystem is smaller than React's. Fewer turnkey component libraries, fewer prebuilt integrations, fewer answers on the second page of search results. The core — state, transitions, SvelteKit — is polished and stable, but if your project leans on a niche React-only library, that dependency effectively chooses your framework. Svelte is the right default when you value small bundles, readable components, and a compiler that catches mistakes at build time; it is the wrong default when your team lives inside React-specific tooling.
+
+It also composes well with what you already run. SvelteKit, the app framework, is Chapter 8's subject and the standard way to build anything with routing or a server. But Svelte is not only SvelteKit: it drops into plain Vite for embeds and widgets, renders as islands inside Astro, and is a first-class UI layer for Tauri — so a Rust core can ship behind a Svelte front end in the same shell you already build with Cargo. Starting a project is one command either way:
+
+```bash
+npx sv create my-app      # SvelteKit: routing, server, adapters included
+npm create vite@latest -- --template svelte   # or: bare Svelte for embeds
+cd my-app && npm run dev
+```
+
+The compiler mental model travels; the rest of this book assumes it.
+
+## Key takeaways
+
+- Svelte moves framework work from runtime to build time: the compiler generates your DOM updates and event wiring, so the browser loads results rather than machinery.
+- A `.svelte` file has three sections — script, markup, style — and the compiler scopes the styles to the component automatically.
+- Runes such as `$state` and `$derived` are compiler keywords, not imports; they make reactivity explicit and replace the older implicit model wholesale.
+- There is no virtual DOM: compiled components update exactly the nodes that depend on changed values, which is where the size and speed wins come from.
+- The tradeoff is ecosystem breadth; the compensation is that Svelte slots into SvelteKit, Astro islands, Vite embeds, and Tauri shells without ceremony.
+
+Next up: the runes themselves, starting with the one every component begins with — `$state`.

@@ -1,0 +1,158 @@
+---
+order: 1
+title: "The Astro Way"
+subtitle: "content-first sites, islands, and zero JS by default"
+description: "Astro starts as pure HTML and adds JavaScript only where you ask for it. This chapter builds the mental model — islands, zero-JS-by-default, and why content-first sites get faster when the framework does less."
+level: "Foundations"
+---
+
+For twenty years the frontend has swung on a pendulum. One end is the multi-page site: every click a full page load, every page HTML served straight from a server, the browser doing what browsers were built to do. The other end is the single-page app: one download, one runtime, navigation rendered in JavaScript. Through the 2010s the pendulum swung hard toward SPAs, and a generation of tooling quietly assumed every site wants to be one. Then something awkward became impossible to ignore: most of what we build is not an app. It is a landing page, a changelog, a blog, a set of docs — and shipping a JavaScript runtime to a visitor's phone so it can render eight hundred words of pricing copy is an expensive way to show text.
+
+You already ship software — React at work, Svelte when you get to choose, Rust and Tauri when the job wants a real binary — so you know what a framework costs and when it pays for itself. Astro is built around a different default: **a page is HTML, generated at build time, delivered with zero JavaScript unless one specific component asks for it.** Everything in this book — routing, content collections, islands, actions — is machinery attached to that default, so this chapter builds the mental model carefully.
+
+## Why Astro exists
+
+Every framework answers one question first: where and when does your page get rendered? React answers "in the browser, after the runtime loads." Next.js and SvelteKit soften that with server rendering, but the page still needs the runtime to hydrate before it is fully alive. Astro answers differently: *at build time, to finished HTML, by default*. The work happens once, on the build machine, and visitors get the answer already baked in.
+
+```astro
+---
+// src/pages/changelog.astro — this frontmatter runs at build time
+const res = await fetch("https://api.example.com/v2/releases");
+const releases = await res.json();
+---
+<html lang="en">
+  <body>
+    <h1>Changelog</h1>
+    <ul>
+      {releases.slice(0, 5).map((release) => (
+        <li><strong>{release.tag_name}</strong> — {release.name}</li>
+      ))}
+    </ul>
+  </body>
+</html>
+```
+
+```html
+<html lang="en">
+  <body>
+    <h1>Changelog</h1>
+    <ul>
+      <li><strong>v2.4.0</strong> — server islands land</li>
+      <li><strong>v2.3.1</strong> — fix: sticky header overlap</li>
+      <li><strong>v2.3.0</strong> — new import pipeline</li>
+    </ul>
+  </body>
+</html>
+```
+
+The API call ran once, during the build, on a machine you control. The visitor's browser never hears about it: no skeleton, no spinner, no client-side fetch. This is the whole thesis in one move — **every unit of work you shift from runtime to build time is a unit the visitor's device doesn't spend.** A framework that does less isn't a lesser framework; for content-first sites it is simply the right one.
+
+## Zero JavaScript by default
+
+Take the default seriously, because most frameworks don't have one. When Astro builds the page above, the output is HTML and CSS and nothing else. No runtime is downloaded. No hydration pass re-executes your components in the browser. The frontmatter ran on the build machine, the template was consumed into markup, and the `.astro` file itself never leaves your repository.
+
+The consequences compound. Content renders the moment HTML arrives, because there is no render-blocking bundle ahead of it in the queue. The page works with JavaScript disabled, throttled, or broken by an aggressive privacy extension. Hosting is trivial — the output is files, which any CDN serves at the edge. And on a three-year-old Android phone over hotel Wi-Fi, your site is just as fast as it is on your laptop, because the device does almost no work.
+
+```text
+GET /                     index.html      14 kB
+GET /_astro/home.css      stylesheet       9 kB
+GET /fonts/body.woff2     font            34 kB
+GET /_astro/hero.avif     image           88 kB
+JavaScript                —                0 kB
+```
+
+That last line is the feature. It is also the budget: the moment you add JavaScript, you are choosing to add it, component by component, rather than accepting it as the cost of admission. The next chapter's file-based router and most of this book's features run entirely inside that zero-JS envelope.
+
+## Islands architecture
+
+Zero JS by default raises the obvious objection: real pages have parts that need JavaScript — a search box, a cart widget, a chart. Astro's answer is *islands architecture*, and it is the load-bearing metaphor for the whole book. A page is a sea of static HTML; the few components that genuinely need script ship their own JavaScript and become interactive on their own schedule. The sea around them stays free.
+
+```astro
+---
+// src/pages/products/[id].astro
+import ProductGallery from "../../components/ProductGallery.svelte";
+import AddToCart from "../../components/AddToCart.svelte";
+import { getProduct } from "../../lib/catalog";
+
+const product = await getProduct(Astro.params.id);
+---
+<html lang="en">
+  <body>
+    <h1>{product.name}</h1>
+    <p>{product.description}</p>   <!-- static HTML: zero JS -->
+    <ProductGallery client:visible images={product.images} />
+    <AddToCart client:idle sku={product.sku} />
+  </body>
+</html>
+```
+
+That `client:visible` attribute is a *hydration directive*: it tells Astro to ship this component's JavaScript and wake it up when it scrolls into view, and to leave everything else alone. The gallery hydrates itself; the description, the reviews, and the footer never pay a byte for it. You will meet the full set of directives and their trade-offs in Chapter 5. For now, hold the shape: interactivity is opt-in, local, and each island pays only its own cost.
+
+## The MPA renaissance
+
+The old objection to multi-page sites was that full page loads feel slow — and in 2015, they did. Three things have changed since. Browsers got smarter: modern engines speculatively prefetch links in the viewport, so by the time you click, the next page is often already in cache. Hosting got fast: HTML on a CDN edge is frequently delivered before a SPA's data fetch would have resolved. And the View Transitions API now lets the browser animate the swap between two full documents, erasing the white flash that made MPAs feel cheap.
+
+Astro leans into the browser instead of replacing it. Its client router — opt-in, a few kilobytes, covered in Chapter 8 — intercepts navigations, fetches the next page's HTML, and swaps it in with persisted state and animated transitions. It is not a JavaScript runtime; it is a thin broker between the pages you already have. SPAs won partly because MPAs felt janky, and the platform has spent a decade fixing the jank. When the documents themselves are cheap, the browser's native machinery is hard to beat.
+
+## Anatomy of an .astro file
+
+Every `.astro` file has two halves, separated by a code fence. The top — the *frontmatter* — is TypeScript that runs at build time or on the server, never in the browser: imports, data fetching, computation. Below the fence is the template: HTML with `{expression}` placeholders. The expressions are template syntax, not a virtual DOM. There is no diffing and no re-render, because the file describes exactly one rendering of one page.
+
+```astro
+---
+// src/pages/team.astro
+import TeamMember from "../components/TeamMember.astro";
+
+const res = await fetch("https://api.example.com/v2/team");
+const team = await res.json();
+const current = team.filter((member) => !member.alumni);
+---
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>The team</title>
+  </head>
+  <body>
+    {current.length === 0 && <p>Nobody here yet.</p>}
+    {current.map((member) => (
+      <TeamMember name={member.name} role={member.role} />
+    ))}
+  </body>
+</html>
+```
+
+Components are imported in the frontmatter and used as tags in the template — and the whole file is an HTML-generating function that disappears after the build. View source on the deployed page and you see the result, not the framework: no runtime namespace, no hydration annotations, no component tree serialized into the wire. Coming from React or Svelte, the discipline is that the frontmatter has no lifecycle and no state; if a value can be computed at build, this is the place it gets computed.
+
+## When Astro fits (and when it doesn't)
+
+Astro's home turf is anything whose unit of delivery is a *page*: marketing sites, blogs, documentation, changelogs, portfolios, catalogs, help centers. It is equally strong at the common hybrid — a content site with a few app-like corners. That is exactly what islands are for, and a page with 95 percent static content plus one search island is the framework operating at design capacity:
+
+```astro
+---
+import SearchDialog from "../components/SearchDialog.svelte";
+import { getCollection } from "astro:content";
+
+const docs = await getCollection("docs");
+---
+<html lang="en">
+  <body>
+    <nav><SearchDialog client:load index={docs.map((d) => d.data)} /></nav>
+    <article>
+      <!-- forty kilobytes of prose, shipping as pure HTML -->
+    </article>
+  </body>
+</html>
+```
+
+Now the honest part: some sites are not pages. An auth-gated dashboard where every screen is a live, stateful view — optimistic updates, websockets, deeply shared client state — will not benefit, because every route is an island and you have rebuilt an SPA with extra ceremony. Reach for Next.js or SvelteKit there, or Tauri when the app wants to be a desktop app. The fit test is a ratio: count the routes that are *documents* and the routes that are *app views*. If documents win, Astro wins. If they don't, no amount of zero-JS default will save you from the framework you actually need.
+
+## Key takeaways
+
+- Astro renders pages to finished HTML at build time, so visitors receive documents rather than a runtime plus instructions for assembling one.
+- Zero JavaScript by default is a budget, not a limitation: interactivity is added per component and each addition pays its own cost.
+- Islands are the core mental model — static HTML everywhere, with script-carrying components waking up on their own schedule via hydration directives.
+- The MPA is competitive again because browsers prefetch, CDNs serve HTML from the edge, and view transitions smooth the swaps; Chapter 8 covers Astro's client router.
+- An `.astro` file is an HTML-generating function: TypeScript frontmatter computes, the template renders, and neither ships to the browser.
+- Fit is a ratio of documents to app views: content-first sites are Astro's strength, while state-heavy, auth-gated dashboards belong to SPA frameworks.
+
+Next: the router. In Astro it is your file tree, and the structure you choose in the first hour is the one you live with in production.

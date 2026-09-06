@@ -1,0 +1,185 @@
+---
+order: 4
+title: "Error Handling"
+subtitle: "fallibility as a type"
+description: "Rust splits failure into two kinds — unrecoverable bugs and recoverable errors — and gives each its own mechanism: panic for the first, Result and the ? operator for the second. Here is how to design error types that scale with your project."
+level: "Core"
+---
+
+Most languages blur the line between "this is a bug" and "this is a thing that can go wrong." Rust refuses to. A broken invariant is a **panic** — loud, immediate, and honest. A missing file, a malformed input, a refused connection is a **`Result`** — a value like any other, present in your function's signature, impossible to forget to handle. This split is the whole philosophy: *recoverable failure is data, unrecoverable failure is an abort.*
+
+That philosophy pays off in the place you spend your days reading code. When you call a function in Rust, its type tells you whether it can fail. `fn read_to_string(path) -> Result<String, io::Error>` cannot fail silently; `fn len(&self) -> usize` cannot fail at all. Error handling stops being archaeology of hidden exceptions and becomes ordinary, checkable plumbing.
+
+## panic! — for bugs, not for weather
+
+A panic unwinds the current thread, running `Drop` for every value on the way out (so resources still get released), and then terminates the thread — or the process, if it was the main thread. `panic!`, `assert!`, `unreachable!`, and slicing past the end of a vector all land here:
+
+```rust
+let v = vec![1, 2, 3];
+// v[10];           // panics: index out of bounds — a real bug
+```
+
+The policy question is *when* to panic, and the ecosystem consensus is crisp: **panic when continuing would mean your program's assumptions are broken** — a configuration file that failed to parse at startup, an enum variant that cannot exist, an internal invariant violated by a bug in your own code. Tests are also a perfectly good place: an unexpected state in a test *should* panic.
+
+And **libraries should almost never panic on inputs they cannot control.** If bad input is part of your function's operating environment — a user types a wrong path, a request contains malformed JSON — return `Err` and let the caller decide. A good heuristic: panic when the *program* is wrong; return `Err` when the *world* is wrong.
+
+For the deliberate cases, `expect` and `unwrap` panic with context. The convention: `expect` with a message explaining the invariant, and reserve bare `unwrap` for prototypes and tests:
+
+```rust
+let port: u16 = std::env::var("PORT")
+    .expect("PORT env var is set by our deployment harness");
+```
+
+## Result and Option
+
+`Result<T, E>` is an enum with exactly two shapes:
+
+```rust
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+```
+
+Because it is an enum, the compiler forces you to consider both. The workhorse is `match`:
+
+```rust
+use std::fs;
+
+fn read_config(path: &str) -> String {
+    match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("warning: falling back to defaults: {err}");
+            String::from("default=true")
+        }
+    }
+}
+```
+
+`Option<T>` — `Some(T)` or `None` — is its sibling for "a value may legitimately be absent," with no error story attached. Mixing them up is a design smell: `None` means *there is no such thing*, `Err` means *we tried and something failed*. Converting between them is one call: `ok_or("reason")` turns an `Option` into a `Result`.
+
+Both types come with a rich combinator vocabulary that keeps happy-path code flat — `map`, `and_then`, `unwrap_or`, `map_err` — worth knowing even though `?` will replace most of them:
+
+```rust
+let port = std::env::var("PORT")
+    .ok()
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(8080);
+```
+
+## The ? operator
+
+Real code chains many fallible calls, and nesting `match` inside `match` does not scale. The `?` operator is the idiomatic answer: on `Ok`, unwrap and continue; on `Err`, **return early from the enclosing function**, converting the error type if needed:
+
+```rust
+use std::fs;
+use std::num::ParseIntError;
+
+fn read_port(path: &str) -> Result<u16, ParseIntError> {
+    let text = fs::read_to_string(path)?;      // Err(io::Error) would need conversion...
+    let port: u16 = text.trim().parse()?;      // ...so let's fix that below
+    Ok(port)
+}
+```
+
+The first `?` there is doing something subtle. `read_to_string` fails with `io::Error`, but the function returns `ParseIntError` — different types. The operator expands to roughly `match expr { Ok(v) => v, Err(e) => return Err(From::from(e)) }`, so it works whenever the function's error type implements `From` for the inner error. That single design choice — `?` delegates conversion to `From` — is what lets small error types compose into large ones without boilerplate at every call site. Fixing the function honestly:
+
+```rust
+use std::{fs, num::ParseIntError};
+
+#[derive(Debug)]
+enum ConfigError {
+    Io(std::io::Error),
+    Parse(ParseIntError),
+}
+
+impl From<std::io::Error> for ConfigError {
+    fn from(e: std::io::Error) -> Self { ConfigError::Io(e) }
+}
+
+impl From<ParseIntError> for ConfigError {
+    fn from(e: ParseIntError) -> Self { ConfigError::Parse(e) }
+}
+
+fn read_port(path: &str) -> Result<u16, ConfigError> {
+    let text = fs::read_to_string(path)?;   // io::Error -> ConfigError::Io
+    let port: u16 = text.trim().parse()?;   // ParseIntError -> ConfigError::Parse
+    Ok(port)
+}
+```
+
+Even `main` can wear a `Result`, which gives you fallible top-level setup with a clean message instead of a panic:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let port = read_port("config.txt")?;
+    println!("serving on {port}");
+    Ok(())
+}
+```
+
+## Designing error types
+
+The enum above is the seed of the pattern that scales: **one error enum per module or crate**, with a variant per failure mode, `Debug` and `Error` derived or implemented, and `From` impls so `?` folds lower-level errors in. Wrap foreign errors with context at the boundary where you understand *why* they happened:
+
+```rust
+#[derive(Debug)]
+enum LoadError {
+    MissingConfig { path: String },
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoadError::MissingConfig { path } =>
+                write!(f, "config file not found: {path}"),
+            LoadError::Io(e) => write!(f, "io failure while loading config: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LoadError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+```
+
+Implementing `Error` and `source()` means your type composes with `Box<dyn Error>`, `anyhow`, and every logging/teardown tool in the ecosystem, which can walk the whole chain of causes.
+
+In practice, two crates industrialize this. **`thiserror`** derives exactly the boilerplate above for library-shaped, typed errors:
+
+```rust
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum LoadError {
+    #[error("config file not found: {path}")]
+    MissingConfig { path: String },
+    #[error("io failure while loading config")]
+    Io(#[from] std::io::Error),
+}
+```
+
+**`anyhow`** is the application-side counterpart: `anyhow::Result<T>` is `Result<T, Box<dyn Error>>` with add-ons, and `.context("loading config")?` attaches human context to whatever bubbles up. The division of labor that has converged across the ecosystem: **typed error enums for libraries** (callers need to match on failure modes), **`anyhow` for binaries and applications** (the top level usually just reports and exits). Hand-roll the enums while learning — the derived crates make far more sense once you have written what they generate.
+
+## Discipline and habits
+
+A few policies that keep error handling sane as a codebase grows. Ban bare `.unwrap()` outside tests by habit (clippy's `unwrap_used` lint enforces it in CI). Prefer `expect("why this holds")` when panicking is genuinely correct — the message becomes part of the crash report. Never return `String` as an error type in a library: callers cannot match on it, and you lose the chain of causes. Add `#[non_exhaustive]` to public error enums so adding a variant later is not a breaking change for downstream matches. And when a failure mode is truly unrecoverable — poisoned mutexes, corrupted internal state — do not contort `Result` around it; panic, and document it.
+
+The deepest habit is conceptual: errors flow *up* through `?` and are handled *once*, where someone can actually do something about them. No catching mid-stack "just in case," no swallowing. The type system keeps the channel honest; your job is to keep the messages useful.
+
+## Key takeaways
+
+- Split failure in two: panics for broken invariants and bugs, `Result` for failures the program should handle.
+- `?` unwraps on success and returns early on error, converting via `From` — which is what lets error enums compose cleanly.
+- Design one error enum per module with `From` impls from underlying errors; `thiserror` derives it for libraries, `anyhow` streamlines binaries.
+- Libraries should avoid panicking on bad input; binaries may `expect` on setup invariants with a clear message.
+- `Option` is absence, `Result` is failure — keep them distinct, convert deliberately, and let function signatures advertise fallibility.
+
+Errors covered, the next hazard is time itself: many things happening at once. Chapter 5 brings the same compile-time rigor to threads, locks, and shared state.

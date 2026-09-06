@@ -1,0 +1,172 @@
+---
+order: 3
+title: "Traits & Generics"
+subtitle: "shared behavior, proven at compile time"
+description: "Traits define what a type can do; generics let you write code once for every type that qualifies. Rust compiles generics into specialized code with no runtime cost — and falls back to dynamic dispatch only where you ask for it."
+level: "Core"
+---
+
+Ownership told you *what* a value is; references told you *how long* you may use it. Traits answer the remaining design question: *what can you do with it?* A trait is a contract of behavior — methods that a type promises to provide — and generics are code written against that contract rather than against any concrete type. Together they replace the inheritance hierarchies of classical OOP with something stricter and faster: behavior checked at compile time, specialized per type, with zero runtime overhead unless you deliberately opt into it.
+
+If you have used interfaces in Java or TypeScript, protocols in Swift, or typeclasses in Haskell, you have the right instincts. The Rust twist is that traits are resolved **statically by default** — and the consequences of that default run through everything in this chapter.
+
+## Defining and implementing traits
+
+A trait declares a set of methods. Some can be required (types must write them); some can be provided with default implementations:
+
+```rust
+trait Summary {
+    fn author(&self) -> String;                 // required
+
+    fn summarize(&self) -> String {             // provided default
+        format!("Read more from {}...", self.author())
+    }
+}
+
+struct Article {
+    title: String,
+    author: String,
+}
+
+struct Tweet {
+    username: String,
+    body: String,
+}
+
+impl Summary for Article {
+    fn author(&self) -> String {
+        self.author.clone()
+    }
+    fn summarize(&self) -> String {
+        format!("{} — by {}", self.title, self.author)
+    }
+}
+
+impl Summary for Tweet {
+    fn author(&self) -> String {
+        format!("@{}", self.username)
+    } // summarize() comes from the default
+}
+```
+
+Both types now satisfy the contract, each with its own behavior where it matters and shared behavior where it doesn't. Note the shape of the deal compared to inheritance: there is no base class, no constructor chaining, no subtype that secretly *is* another type. A struct is itself; a trait is something it can do. You may inherit behavior by composing traits, but you never inherit representation.
+
+One rule to know early — the **orphan rule**: you may implement a trait for a type only if you own the trait or the type. Your `Summary` trait on your `Article`: fine. The standard library's `Display` on your `Article`: fine. `Display` on `Vec<i32>`: not allowed, because neither is yours. The rule exists to keep the ecosystem coherent — without it, two crates could each add conflicting behavior to the same type, and no `impl` anywhere would be trustworthy. When you hit it, the standard escape hatches are a **newtype wrapper** (`struct MyVec(Vec<i32>)`) or a local trait.
+
+## Generic functions and trait bounds
+
+Now write a function that works on anything summarizable. The explicit form spells out a **trait bound**:
+
+```rust
+fn notify<T: Summary>(item: &T) {
+    println!("Breaking news: {}", item.summarize());
+}
+```
+
+And the ergonomic shorthand — "any argument that implements `Summary`" — means exactly the same thing:
+
+```rust
+fn notify(item: &impl Summary) {
+    println!("Breaking news: {}", item.summarize());
+}
+```
+
+Here is the part that makes Rust generics genuinely different from Java-style interfaces. The compiler performs **monomorphization**: for every concrete type used with `notify`, it generates a specialized copy of the function, with the method call resolved to that type's implementation. `notify(&article)` becomes a call to one concrete function; `notify(&tweet)` becomes another. There is no interface table consulted at runtime, no virtual dispatch, no JIT warmup — the dispatch is as direct as if you had written both functions by hand. This is the "zero-cost" claim, and it is literal: **static dispatch to generics, with inlining available to the optimizer.**
+
+Bounds compose, and `where` clauses keep complex signatures readable:
+
+```rust
+fn summarize_all<T>(items: &[T]) -> String
+where
+    T: Summary + Clone,
+{
+    items
+        .iter()
+        .map(|t| t.clone().summarize())
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+```
+
+Returning `impl Trait` is the mirror image — a function that promises "some type implementing this trait," with the concrete type fixed and known to the compiler but hidden from callers:
+
+```rust
+fn best_article() -> impl Summary {
+    Article {
+        title: String::from("Zero-cost abstractions, for real"),
+        author: String::from("H. Voss"),
+    }
+}
+```
+
+That is ideal for constructors and iterators you don't want to spell out. The one limitation: all return paths must produce the *same* concrete type. If you need to return different types from different branches, you want the next section.
+
+## Trait objects and dynamic dispatch
+
+Static dispatch has a cost of its own: specialization multiplies code and makes "a mixed bag of summarizable things" impossible to type, because a `Vec<T>` must hold exactly one `T`. When you need heterogeneity — or when binary size matters more than branch prediction — ask for dispatch through a **trait object**:
+
+```rust
+let feed: Vec<Box<dyn Summary>> = vec![
+    Box::new(Article {
+        title: String::from("Small stacks"),
+        author: String::from("T. Klein"),
+    }),
+    Box::new(Tweet {
+        username: String::from("hvoss"),
+        body: String::from("traits are just types of types"),
+    }),
+];
+
+for item in &feed {
+    println!("{}", item.summarize()); // resolved at runtime via vtable
+}
+```
+
+`dyn Summary` is an *unsized* type — the compiler cannot know how big each element is — so it lives behind a pointer (`&dyn Summary`, `Box<dyn Summary>`, `Rc<dyn Summary>`). At runtime each call goes through a **vtable**: one pointer indirection per call, plus the erasure of the concrete type. That is the entire cost, and it is the same deal you were implicitly making in any interface-heavy language.
+
+The design habit worth building: **default to generics; reach for `dyn` at architectural seams.** A library's core algorithm wants monomorphization; a plugin registry, a heterogeneous collection, or a boundary where the set of types is genuinely open wants `dyn`. A trait is *object-safe* (dyn-compatible) when its methods don't return `Self` by value or use generics — the restriction exists precisely because a vtable caller must know the layout of what it gets back.
+
+## The traits you will meet everywhere
+
+A short tour of the standard library's load-bearing traits, because recognizing them is half of reading Rust fluently:
+
+- **`Debug`** — formatting with `{:?}`. Derive it on everything you write; the panic and logging output of the entire ecosystem depends on it.
+- **`Display`** — user-facing formatting with `{}`. Cannot be derived; you write it, and it is your type's public face.
+- **`Clone` and `Copy`** — from chapter 1: explicit deep copy, and implicit bitwise copy respectively.
+- **`PartialEq`/`Eq`** — `==`; **`PartialOrd`/`Ord`** — `<` and sorting; all derivable when the fields are.
+- **`Default`** — a canonical empty value, derivable, and the backbone of the builder pattern.
+- **`From`/`Into`** — infallible conversions. Implement `From<T> for U` and get `Into` for free; this is also what makes the `?` operator's automatic error conversion work in chapter 4.
+- **`Iterator`** — the trait behind every `for` loop and the whole `map`/`filter`/`collect` ecosystem; chapter 9 leans on it hard.
+
+Deriving the mechanical ones is the idiomatic starting point:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Config {
+    name: String,
+    retries: u32,
+}
+```
+
+## Associated types, briefly
+
+You will meet one more piece of syntax immediately in real code: traits with **associated types**, like `Iterator`:
+
+```rust
+pub trait Iterator {
+    type Item;
+    fn next(&mut self) -> Option<Self::Item>;
+}
+```
+
+`type Item` says: each implementor picks one output type, once, for the whole trait. It keeps signatures clean (`Option<Self::Item>` instead of `Option<T>` with a `T` on every method) and encodes a real constraint — an iterator yields one kind of thing, not "any of several." When you design your own traits, the rule of thumb: use a generic parameter when a type may implement the trait many times with different types (`From<u8>` and `From<String>` both exist); use an associated type when there is exactly one natural choice per implementor.
+
+## Key takeaways
+
+- Traits are compile-time contracts of behavior; there is no inheritance of representation, only of interface, and the orphan rule keeps ecosystem impls coherent.
+- Generics monomorphize: each concrete type gets its own specialized copy with direct calls — abstraction without runtime cost.
+- `impl Trait` in argument position is shorthand for a generic bound; in return position it hides a single concrete type.
+- `Box<dyn Trait>` enables heterogeneous collections and open extension via one vtable indirection — use it at architectural seams, not everywhere.
+- The standard library's traits — `Debug`, `Clone`, `From`, `Iterator`, and friends — are the shared vocabulary of all Rust code; deriving them is the default starting move.
+
+You can now describe behavior precisely. The next two chapters apply that machinery to the two things systems code cannot avoid: things go wrong (errors), and many things happen at once (concurrency).

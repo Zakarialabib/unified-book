@@ -1,0 +1,104 @@
+---
+import { getCollection } from 'astro:content';
+---
+
+<div class="doc-generator">
+  <h2>Generate Client Documentation</h2>
+  <p>Create educational and promotional documentation for your clients from the unified book content.</p>
+
+  <div class="doc-options">
+    <div class="doc-option selected" data-coll="all" onclick="selectDocOption(this)">
+      <h4>📚 All Chapters</h4>
+      <p>Include content from all three series</p>
+    </div>
+    <div class="doc-option" data-coll="astro" onclick="selectDocOption(this)">
+      <h4>🌌 Astro Ecosystem</h4>
+      <p>Only The Astro Ecosystem chapters</p>
+    </div>
+    <div class="doc-option" data-coll="svelte" onclick="selectDocOption(this)">
+      <h4>⚡ Reactivity with Svelte</h4>
+      <p>Only Svelte chapters</p>
+    </div>
+    <div class="doc-option" data-coll="rust" onclick="selectDocOption(this)">
+      <h4>🦀 Systems Programming in Rust</h4>
+      <p>Only Rust chapters</p>
+    </div>
+  </div>
+
+  <div class="doc-options">
+    <div class="doc-option selected" data-fmt="html" onclick="selectDocOption(this)">
+      <h4>🌐 HTML Export</h4>
+      <p>Full HTML documentation with styling</p>
+    </div>
+    <div class="doc-option" data-fmt="markdown" onclick="selectDocOption(this)">
+      <h4>📝 Markdown Export</h4>
+      <p>Plain markdown for any platform</p>
+    </div>
+  </div>
+
+  <button class="export-btn" id="export-btn" onclick="generateDocs()">
+    📄 Generate Documentation
+  </button>
+
+  <div id="doc-output" style="margin-top:2rem;"></div>
+</div>
+
+<script>
+  let selectedCollection = 'all';
+  let selectedFormat = 'html';
+
+  function selectDocOption(el: HTMLElement) {
+    const type = el.dataset.coll ? 'coll' : 'fmt';
+    const val = el.dataset.coll || el.dataset.fmt;
+    const parent = el.closest('.doc-options');
+    parent?.querySelectorAll('.doc-option').forEach((o) => o.classList.remove('selected'));
+    el.classList.add('selected');
+    if (type === 'coll') selectedCollection = val;
+    else selectedFormat = val;
+  }
+
+  async function generateDocs() {
+    const btn = document.getElementById('export-btn') as HTMLButtonElement;
+    btn.textContent = 'Generating...';
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/api/docs/generate?collection=' + selectedCollection + '&format=' + selectedFormat);
+      const data = await res.json();
+      const output = document.getElementById('doc-output')!;
+      if (data.html) {
+        output.innerHTML = '<iframe src="data:text/html;charset=utf-8,' + encodeURIComponent(data.html) + '" style="width:100%;height:600px;border:1px solid var(--rule);border-radius:10px;"></iframe>';
+      } else {
+        output.innerHTML = '<pre style="background:var(--bg-2);padding:1rem;border-radius:8px;overflow-x:auto;">' + (data.content || 'No content generated') + '</pre>';
+      }
+      btn.textContent = '📄 Generate Documentation';
+      btn.disabled = false;
+    } catch (e) {
+      btn.textContent = 'Error — try again';
+      btn.disabled = false;
+    }
+  }
+</script>
+
+<style>
+  .doc-generator h2 { font-family: var(--serif-display); margin: 0 0 0.5rem; }
+  .doc-generator p { color: var(--ink-2); line-height: 1.7; margin-bottom: 1rem; }
+  .doc-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; margin: 2rem 0; }
+  .doc-option {
+    border: 1px solid var(--rule); border-radius: 10px; padding: 1.2rem;
+    background: var(--bg-2); cursor: pointer; transition: border-color 0.2s;
+  }
+  .doc-option:hover { border-color: var(--accent); }
+  .doc-option.selected { border-color: var(--accent); background: var(--accent-soft); }
+  .doc-option h4 { font-family: var(--serif-display); margin: 0 0 0.3rem; }
+  .doc-option p { font-size: 0.88rem; color: var(--ink-2); margin: 0; }
+  .export-btn {
+    display: inline-flex; align-items: center; gap: 0.55rem;
+    font-family: var(--serif-display); font-size: 0.95rem;
+    background: var(--accent); color: #f8f2e2; border: none;
+    border-radius: 999px; padding: 0.7rem 1.8rem; cursor: pointer;
+    transition: filter 0.2s; margin-top: 1rem;
+  }
+  .export-btn:hover { filter: brightness(1.08); }
+  .export-btn:disabled { opacity: 0.6; }
+</style>

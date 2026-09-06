@@ -1,0 +1,121 @@
+---
+order: 7
+title: "Unsafe Rust"
+subtitle: "the escape hatch, and its contract"
+description: "unsafe does not turn off the borrow checker — it unlocks five extra powers and hands you the job of upholding memory safety yourself. The goal is always the same: wrap the unsafety in a safe API and never let it leak."
+level: "Systems"
+---
+
+Everything so far has been the compiler checking your work. `unsafe` is where the direction reverses: you take the checker's seat, with a specific and demanding job description. The misconception to kill immediately — `unsafe` is **not** "Rust with the borrow checker disabled." The borrow checker still runs inside unsafe blocks; ownership, borrows, and lifetimes still apply. What unsafe actually grants is the ability to perform operations the compiler *cannot verify*: raw pointer dereferences, calls to foreign functions, mutation of statics. For those, no automatic check exists — so the obligation shifts from compiler to author.
+
+The number to keep in mind: real Rust codebases typically hold unsafe to a few percent, concentrated in foundational layers. The standard library's `split_at_mut`, `Vec`, `String`, `Arc` — all use unsafe internally so that *your* code never has to. The discipline of the language is precisely that: **unsafe is a wrapper's tool, and the wrapper's job is to make it invisible.**
+
+## The five superpowers
+
+Writing `unsafe` does five things, no more. Inside an `unsafe` block (or `unsafe fn`), you may:
+
+1. **Dereference raw pointers** (`*const T`, `*mut T`);
+2. **Call `unsafe` functions**, including all FFI (chapter 8);
+3. **Access or modify `static mut` variables**;
+4. **Read fields of `union`s**;
+5. **Implement `unsafe` traits**, chiefly `Send` and `Sync`.
+
+Everything else — moves, borrows, drops, even allocation — stays in the safe world. Here is the canonical raw-pointer tour:
+
+```rust
+let mut num = 5;
+
+let r1 = &num as *const i32;   // creating raw pointers is SAFE
+let r2 = &mut num as *mut i32; // and so is this
+
+unsafe {
+    println!("r1: {}", *r1); // dereferencing is the unsafe act
+    *r2 = 10;                // so is writing through one
+}
+println!("{num}");
+```
+
+Note the split: *creating* a raw pointer (aliasing an address) is safe and can be done in safe code; *dereferencing* asserts "I guarantee this pointer is valid, aligned, initialized, and — for writes — not aliased," and that assertion is what requires `unsafe`. Rust 2024 also gives you the cleaner `&raw const num` / `&raw mut num` syntax for creating them.
+
+Why do raw pointers exist at all, when references exist? Three honest reasons: they can alias freely (multiple raw pointers to the same data is legal, unlike `&mut`); they have no lifetime attached (they can be stored in structs and handed across APIs where a reference would embed a lifetime); and they are the currency of FFI — C's `T*` maps to `*mut T`, full stop. They are a *worse* reference and a *universal* interface at the same time.
+
+## The actual contract
+
+The unsafe block is a promise with named clauses. When you dereference `*mut T` or call an unsafe function, you are asserting:
+
+- **Valid memory** — the pointer points into an allocated, properly aligned, initialized object that is still alive.
+- **Exclusive access for writes** — no other code reads or writes that memory while the write happens (the aliasing rule from chapter 2, now enforced by *you*).
+- **Valid values** — for types like `bool`, `&T`, `char`, or enums, the bits you produce must be a legal value; `mem::transmute` to a type whose bit patterns don't match is instant undefined behavior.
+- **No unwinding across borders** — panicking out through FFI (chapter 8) or through certain `extern` calls is UB; catch it with `catch_unwind` where it can happen.
+
+Break any clause and you get **undefined behavior** — not a crash, but a license for the optimizer to assume something impossible, which manifests as corruption, "impossible" miscompiles, or security holes that appear only under optimization. This is why unsafe review comments read like legal contracts, and why the community norm is explicit:
+
+```rust
+/// # Safety
+///
+/// - `ptr` must be valid for writes of `len` elements of `T`.
+/// - `ptr` must be non-null and correctly aligned.
+/// - Caller must ensure no other access to the region during the call.
+pub unsafe fn fill(ptr: *mut u8, len: usize, value: u8) { /* ... */ }
+```
+
+If an `unsafe fn` or block cannot state its invariants in a doc comment, it is not ready to ship.
+
+## Case study: wrapping unsafe in a safe API
+
+Here is the pattern that justifies the whole chapter — borrow-checked code that the borrow checker cannot prove, made safe by hand. The task: split a mutable slice into two non-overlapping halves. Straight references are illegal (two `&mut` to the same slice), but the operation is obviously sound if `mid` is in bounds — the regions genuinely do not overlap. The standard library's `split_at_mut` does exactly this dance:
+
+```rust
+fn split_at_mut(values: &mut [i32], mid: usize) -> (&mut [i32], &mut [i32]) {
+    let len = values.len();
+    let ptr = values.as_mut_ptr();
+
+    assert!(mid <= len); // ← the invariant, checked HERE, once
+
+    unsafe {
+        (
+            std::slice::from_raw_parts_mut(ptr, mid),
+            std::slice::from_raw_parts_mut(ptr.add(mid), len - mid),
+        )
+    }
+}
+
+fn main() {
+    let mut v = [10, 20, 30, 40];
+    let (left, right) = split_at_mut(&mut v, 2);
+    left[0] += 1;
+    right[0] += 1;
+    println!("{v:?}"); // [11, 20, 31, 40]
+}
+```
+
+Read the structure, because it is *the* template: an `assert!` turns an uncheckable promise into a checked precondition; the unsafe block is three lines long; and the function signature is **100% safe** — callers cannot misuse it, no matter what they do. All of the risk was purchased by the author and paid once, inside a walled garden. `from_raw_parts_mut` is itself `unsafe` (with the same contract: valid, aligned, initialized, exclusive), and our assert is what lets us honestly claim it.
+
+This is why "how much unsafe is in a project" is the wrong question. The right questions: is it in a leaf layer? Is every block justified by a written invariant? Does it leak into public safe signatures?
+
+## unsafe impl Send/Sync and the rest of the list
+
+The fifth superpower deserves its own warning, because it has no code block to point at. `unsafe impl Send for MyType` asserts "my type really can move between threads safely" — an assertion about *your* aliasing design that the compiler cannot check. You reach for it when wrapping a non-`Send` foreign type that you know is thread-safe (a C library handle documented as thread-safe, say), and the doc comment must cite the evidence. The same story covers `static mut` — a global mutable variable is an instant data race unless access is synchronized, which is why modern style prefers `static` + `Mutex`/atomics (chapter 5) — and `union` fields, where reading past the last-written variant is your responsibility (Rust unions are FFI/interop tools, not C-style convenience).
+
+Since Rust 2024, unsafe blocks must carry an `unsafe(...)` attribute listing the operations they rely on (`unsafe(op_unsafe_access)`), and unused unsafe blocks are linted — the language is actively narrowing the blast radius.
+
+## Tools and discipline
+
+You are fallible, so mechanize the checking. **Miri** — `cargo +nightly miri test` — is an interpreter that detects undefined behavior in unsafe code: invalid frees, out-of-bounds access, aliasing violations, uninitialized reads. It is slow, and it is non-negotiable for unsafe-heavy crates. **Clippy** catches unsafe antipatterns; **fuzzing** (cargo-fuzz) and **AddressSanitizer** builds stress the boundaries. Discipline wraps the tools:
+
+- **Minimize the surface**: unsafe lives in dedicated modules with `#![forbid(unsafe_code)]` everywhere else.
+- **Wrap, don't expose**: public APIs are safe; unsafe is an implementation detail behind checked invariants.
+- **Write the contract**: every unsafe block gets a comment naming the exact invariants it assumes and where they are enforced.
+- **Prefer safe primitives first**: `Arc<Mutex>`, atomics, `mem::take`, `itertools` — most "I need unsafe" impulses dissolve against them.
+
+And keep perspective: you already *depend* on unsafe constantly. `Vec`, `Box`, `String`, `Mutex`, `tokio`'s scheduler, the OS interface — all contain unsafe, audited by thousands of eyes. Learning to read and write it makes you a complete Rust programmer, not a daredevil.
+
+## Key takeaways
+
+- unsafe grants exactly five abilities — raw deref, unsafe calls, `static mut`, union fields, unsafe trait impls — and the borrow checker keeps running inside the block.
+- The unsafe author owns memory-safety invariants: validity, alignment, initialization, and write-exclusivity; breaking them is undefined behavior, not a panic.
+- The template is `assert!` + tiny unsafe block + safe public signature: check what can be checked, isolate what cannot, never leak the unsafety.
+- `unsafe impl Send/Sync` is a claim about your type's aliasing design — make it only with documented evidence.
+- Use Miri, clippy, and fuzzing to check the checker; confine unsafe with `#![forbid(unsafe_code)]` and keep public APIs safe.
+
+The largest consumer of unsafe in practice is the border with C. The next chapter walks straight up to that border: FFI, where Rust's invariants meet code that has never heard of them.

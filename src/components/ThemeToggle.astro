@@ -1,0 +1,32 @@
+---
+interface Props {
+  label?: string;
+}
+const { label = 'dim' } = Astro.props;
+---
+
+<button class="theme-btn" id="theme-toggle" type="button" aria-label="Toggle color theme">
+  <span data-theme-label>{label}</span>
+</button>
+
+<script>
+  const root = document.documentElement;
+  const toggle = document.getElementById('theme-toggle')!;
+  const labelEl = toggle.querySelector('[data-theme-label]') as HTMLElement;
+
+  const themes = ['light', 'dim', 'book'] as const;
+  function next(t: string) { return themes[(themes.indexOf(t as any) + 1) % themes.length]; }
+
+  function syncLabel() {
+    const current = root.getAttribute('data-theme');
+    labelEl.textContent = current === 'dim' ? 'light' : current === 'light' ? 'dim' : current;
+  }
+  syncLabel();
+
+  toggle.addEventListener('click', () => {
+    const n = next(root.getAttribute('data-theme') || 'light');
+    root.setAttribute('data-theme', n);
+    localStorage.setItem('unifiedbook-theme', n);
+    syncLabel();
+  });
+</script>

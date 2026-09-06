@@ -1,0 +1,132 @@
+---
+import Base from './Base.astro';
+import TopBar from '../components/TopBar.astro';
+import type { CollectionEntry } from 'astro:content';
+
+interface Props {
+  entry: CollectionEntry<'astro' | 'svelte' | 'rust'>;
+  index: number;
+  total: number;
+  prev: CollectionEntry<'astro' | 'svelte' | 'rust'> | null;
+  next: CollectionEntry<'astro' | 'svelte' | 'rust'> | null;
+  minutes: number;
+  words: number;
+  headings: { depth: number; slug: string; text: string }[];
+}
+
+const { entry, index, total, prev, next, minutes, words, headings } = Astro.props;
+const data = entry.data;
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+---
+
+<Base title={`${data.title} — ${data.series}`} description={data.description} series={data.series} color={data.color}>
+  <TopBar series={data.series} color={data.color} />
+
+  <main class="wrap">
+    <header class="chapter-head">
+      <div class="eyebrow">
+        <span class="series" style="color: {data.color}">{data.series}</span>
+        <span class="dot">·</span>
+        <span>Chapter {data.order} of {total}</span>
+        <span class="dot">·</span>
+        <span>{data.level}</span>
+      </div>
+      <h1 class="chapter-title">
+        {data.title}, <em>{data.subtitle}</em>
+      </h1>
+      <p class="chapter-deck">{data.description}</p>
+      <div class="chapter-meta">
+        <span>{minutes} min read</span>
+        <span class="dot">·</span>
+        <span>{words.toLocaleString('en-US')} words</span>
+      </div>
+      <div class="chapter-actions">
+        <button class="btn primary" id="listen-start" type="button">
+          <span aria-hidden="true">▶</span> Listen to this chapter
+        </button>
+        <button class="btn" id="mark-read" type="button" data-slug={entry.id}>
+          <span class="tick" aria-hidden="true"></span>
+          <span data-label>Mark chapter as read</span>
+        </button>
+      </div>
+    </header>
+
+    <div class="chapter-layout">
+      <aside class="chapter-toc">
+        <div class="toc-label">On this page</div>
+        <ul class="toc-list" id="toc-list">
+          {toc.map((h) => (
+            <li class:list={[h.depth === 3 && 'num-h3']} data-slug={h.slug}>
+              <a href={`#${h.slug}`}>{h.text}</a>
+            </li>
+          ))}
+        </ul>
+        <p class="toc-note">Your progress and preferences are saved locally in your browser.</p>
+      </aside>
+
+      <article class="prose" id="chapter-body">
+        <slot />
+      </article>
+    </div>
+
+    <nav class="chapter-nav" aria-label="Chapter navigation">
+      <div class="nav-grid">
+        {prev ? (
+          <a class="nav-card" href={`/chapters/${prev.id}/`}>
+            <div class="dir">← Previous · Chapter {prev.data.order}</div>
+            <div class="t">{prev.data.title}</div>
+            <div class="s">{prev.data.subtitle}</div>
+          </a>
+        ) : (
+          <a class="nav-card disabled" href="/" aria-disabled="true">
+            <div class="dir">← Previous</div>
+            <div class="t">The beginning</div>
+            <div class="s">This is the first chapter.</div>
+          </a>
+        )}
+        {next ? (
+          <a class="nav-card next" href={`/chapters/${next.id}/`}>
+            <div class="dir">Next · Chapter {next.data.order} →</div>
+            <div class="t">{next.data.title}</div>
+            <div class="s">{next.data.subtitle}</div>
+          </a>
+        ) : (
+          <a class="nav-card next" href="/">
+            <div class="dir">The end →</div>
+            <div class="t">Back to the table of contents</div>
+            <div class="s">You have reached the last chapter.</div>
+          </a>
+        )}
+      </div>
+    </nav>
+  </main>
+
+  <!-- Listen bar (enhanced TTS) -->
+  <div class="listen-bar" id="listen-bar" role="region" aria-label="Text to speech controls">
+    <button class="lb-play" id="tts-play" type="button" aria-label="Play or pause">
+      <svg id="tts-icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v13l11-6.5z" /></svg>
+      <svg id="tts-icon-pause" viewBox="0 0 16 16" aria-hidden="true" style="display:none"><path d="M3 1.5h4v13H3zM9 1.5h4v13H9z" /></svg>
+    </button>
+    <div class="lb-mid">
+      <div class="lb-status" id="tts-status" aria-live="polite">Ready to read aloud</div>
+      <div class="lb-controls">
+        <label for="tts-rate">Speed</label>
+        <select id="tts-rate">
+          <option value="0.8">0.8×</option>
+          <option value="0.9">0.9×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.1">1.1×</option>
+          <option value="1.25">1.25×</option>
+          <option value="1.5">1.5×</option>
+        </select>
+        <label for="tts-voice">Voice</label>
+        <select id="tts-voice"></select>
+      </div>
+    </div>
+    <button class="lb-close" id="tts-stop" type="button" aria-label="Stop and close">×</button>
+  </div>
+</Base>
+
+<script>
+  import '../scripts/chapter.ts';
+</script>

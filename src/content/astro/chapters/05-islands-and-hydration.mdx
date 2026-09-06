@@ -1,0 +1,174 @@
+---
+order: 5
+title: "Islands & Hydration"
+subtitle: "adding JavaScript exactly where it pays"
+description: "client:visible, client:idle, client:load — hydration directives let Svelte, React, or Vue components ship as isolated islands in a sea of static HTML. Islands are Astro's core trade: interactivity on demand, nothing else."
+level: "Intermediate"
+---
+
+Chapter 1 promised that interactivity is opt-in and pays its own way. This chapter is where you learn the exchange rate. Islands are Astro's core trade: a component ships its framework and hydrates in the browser, everything around it ships nothing, and you decide component by component which is which. Since you already write Svelte and React, the components themselves will be familiar ground — the new material is the *boundary*: what crosses it, when the island wakes up, and when a plain script is the better tool for the job.
+
+## The cost of hydration
+
+Hydration is the price SPA frameworks pay for server rendering: the HTML arrives, and then the framework downloads, boots, re-runs your components, and re-attaches event listeners so the page becomes interactive. The output HTML was free; making it *alive* is not. A modest React page ships the framework itself before any of your code, and the whole bundle executes on the visitor's device regardless of how little of the page actually responds to input.
+
+```text
+What a typical hydrated page ships before it is interactive:
+
+  react + react-dom        ~45 kB gzip
+  your component tree      30-120 kB gzip
+  state + data layer       10-40 kB gzip
+```
+
+The waste is structural, not a sign of doing it wrong: in a hydrated app, *every* component pays the framework cost whether it is interactive or not. Islands invert the accounting. The static 95 percent of the page is HTML with no framework attached, and the framework cost is charged only to the components that genuinely need it — and only at the moment they need it.
+
+## Your first island
+
+An island is any framework component rendered inside an `.astro` file with a hydration directive. Here is an upvote button in Svelte 5 — unremarkable by your standards, which is the point:
+
+```svelte
+<!-- src/components/Upvote.svelte -->
+<script>
+  let count = $state(0);
+</script>
+
+<button onclick={() => count++}>
+  Upvoted {count} times
+</button>
+```
+
+Using it is two lines: an import in the frontmatter, a directive on the tag.
+
+```astro
+---
+// src/pages/blog/[slug].astro
+import Upvote from "../../components/Upvote.svelte";
+---
+<article>
+  <h1>A completely static article</h1>
+  <p>Every byte of this prose ships as plain HTML…</p>
+  <Upvote client:visible />
+</article>
+```
+
+The directive is doing all the work. `client:visible` tells Astro to render the button's initial HTML at build time like everything else, ship the Svelte runtime and this component only if the button is on screen, and hydrate it when it scrolls into view. The article around it — however long — pays nothing. You can render the same component ten times on a page and the runtime ships once; the islands share the framework, not the work.
+
+## The client directives
+
+There are five directives, and each answers one question: *when does this island's JavaScript download and execute?*
+
+```astro
+<Search client:load />
+<ThemeToggle client:idle />
+<Comments client:visible />
+<Chart client:media="(min-width: 48rem)" />
+<LiveTicker client:only="svelte" />
+```
+
+`client:load` hydrates as soon as the page loads — for controls the user will reach for immediately. `client:idle` waits for the browser to be idle via `requestIdleCallback` — good for things wanted soon but not first, like a theme toggle. `client:visible` waits for the island to enter the viewport — the workhorse for pages where content scrolls and the interactive part is below the fold. `client:media` hydrates only when a media query matches — a mobile-only menu never touches a desktop visitor's network. `client:only` skips server-side rendering entirely: the island renders only in the browser, useful when a component depends on `window` or draws differently every time, at the cost of an empty placeholder until it loads. Every directive except `client:only` still server-renders the initial HTML, so the page never flashes empty where content could have been.
+
+The choice is a small scheduling decision, and it is worth making deliberately because the default temptation — `client:load` on everything — quietly reintroduces the waterfall islands were invented to avoid. The decision tree in practice: does the user need it on first paint, like a nav search? Then `client:load`. Is it needed soon but not first? `client:idle`. Is it below the fold or off in a tab? `client:visible`, and most islands in content-heavy sites are this one. Does it only exist on one breakpoint? `client:media`. Does it render nothing useful on the server? `client:only`, and pay for it knowingly.
+
+```astro
+---
+import MobileNav from "../components/MobileNav.svelte";
+import NewsletterForm from "../components/NewsletterForm.svelte";
+---
+<MobileNav client:media="(max-width: 48rem)" />
+<footer>
+  <NewsletterForm client:idle />
+</footer>
+```
+
+The habit that keeps pages fast: pick the *latest* moment the island can wake up without the user noticing. A newsletter form in the footer hydrated on idle is indistinguishable from one hydrated on load — except on a slow phone, where it isn't.
+
+## Frameworks inside Astro
+
+Islands are framework-agnostic, and mixing frameworks on one page is a supported configuration, not a hack. Install the integration once — `npx astro add react`, `npx astro add vue` — and the directives work identically on any framework's components:
+
+```astro
+---
+import LikeButton from "../components/LikeButton";
+import Upvote from "../components/Upvote.svelte";
+---
+<Upvote client:visible />
+<LikeButton postId="astro-5" client:idle />
+```
+
+The React component needs no changes to become an island — same props, same hooks, same testing story you already have. Each island carries only its own framework's runtime, so a Svelte island costs a couple of kilobytes while a React island costs the React baseline; that difference is a legitimate factor when choosing what to write new islands in. What you should avoid is frameworks *hydrating each other's territory* — an island is self-contained by design, and passing state between islands is your signal to reconsider the boundary rather than build a bridge.
+
+## Passing props to islands
+
+Props cross the island boundary by being serialized into the HTML that ships, then revived in the browser. That constrains the shape: JSON-shaped values — strings, numbers, booleans, plain objects and arrays — plus a few structured types Astro knows how to serialize, like `Date`, `Map`, and `Set`. Functions and class instances do not cross:
+
+```astro
+---
+import AddToCart from "../components/AddToCart.svelte";
+
+const product = {
+  sku: "nb-2025",
+  name: "Field Notebook",
+  price: 14,
+  tags: ["paper", "grid"],
+};
+---
+<AddToCart client:visible product={product} maxQuantity={9} />
+```
+
+The type checker still validates the props against `AddToCart`'s declared types — but the runtime constraint is serialization, not TypeScript. In practice two patterns cover the gaps. Big data: don't pass it; pass an id and let the island fetch what it needs when it wakes up. Behavior: don't pass callbacks; pass configuration. An island that receives `onSave` as a prop is a component that has outgrown the boundary — restructure it so the island owns its behavior and the static page owns its placement.
+
+## Scripts without islands
+
+Before reaching for an island, ask whether the behavior needs a framework at all. A `<script>` tag in an `.astro` file is processed by Astro: bundled, TypeScript-enabled, and deduplicated — the script ships once per page even if the component using it renders ten times, because module scripts execute once regardless of how many times they appear:
+
+```astro
+---
+// src/components/CopyButton.astro
+interface Props {
+  code: string;
+}
+const { code } = Astro.props;
+---
+<button data-copy={code}>Copy</button>
+
+<script>
+  document.querySelectorAll("[data-copy]").forEach((button) => {
+    button.addEventListener("click", () => {
+      navigator.clipboard.writeText(button.dataset.copy ?? "");
+    });
+  });
+</script>
+```
+
+That is a genuinely interactive component — state changes, event listeners, feedback to the user — with no framework and no hydration. The rule of thumb: if the behavior is a few lines of DOM work with no meaningful state, a script is lighter than an island in bytes, complexity, and honesty. If there is real state, re-rendering, or framework components inside, use an island. Use `is:inline` to opt out of processing when you need a raw, un-bundled script exactly where you wrote it — third-party embeds are the usual reason.
+
+## Third-party scripts with partytown
+
+The heaviest scripts on many sites are ones you didn't write: analytics, tag managers, A/B testing. They land on the main thread and contend with everything you shipped, which is a bitter trade for code that exists to measure your site. *Partytown* relocates third-party scripts into a web worker, off the main thread entirely, with DOM access proxied behind the scenes:
+
+```astro
+---
+// src/layouts/BaseLayout.astro
+import { Partytown } from "@qwik.dev/partytown/react";
+---
+<head>
+  <Partytown forward={["dataLayer.push"]} />
+  <script
+    type="text/partytown"
+    src="https://www.googletagmanager.com/gtag/js?id=G-ABC123"
+  ></script>
+</head>
+```
+
+The `type="text/partytown"` attribute is the whole trick: the browser ignores the script as JavaScript, and the worker executes it. Calls your page makes into the analytics API — the `forward` list — are shuttled to the worker so the integration behaves normally. Cost is one component and a few kilobytes; benefit is a main thread that belongs to your users. It composes cleanly with everything in this chapter: islands for the interactivity you chose, partytown for the scripts you didn't.
+
+## Key takeaways
+
+- Hydration charges the whole page for the framework; islands charge only the components that are interactive, and only when they wake up.
+- The five directives are a scheduling menu — `load`, `idle`, `visible`, `media`, `only` — and the right choice is the latest wake-up the user won't notice.
+- Svelte, React, and Vue components become islands without modification; each ships only its own runtime, and mixing frameworks on a page is supported.
+- Props must be serializable: pass data and configuration across the boundary, fetch big data inside the island, and never pass functions.
+- A processed, deduplicated `<script>` is lighter than an island for small DOM-level behavior; reach for a framework when real state demands it.
+- Move third-party scripts off the main thread with partytown so the performance you reclaimed from your own bundle isn't donated to your analytics vendor.
+
+Islands cover interactivity in the browser — but some data is inherently dynamic no matter how static the page is. Next: rendering modes, and deciding where each page actually comes from.

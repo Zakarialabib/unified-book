@@ -1,0 +1,42 @@
+---
+interface Props {
+  srcCode: string;
+  srcLanguage: string;
+  outputCode: string;
+  outputLanguage: string;
+  srcFilename: string;
+  outputFilename: string;
+  title?: string;
+}
+const { srcCode, srcLanguage, outputCode, outputLanguage, srcFilename, outputFilename, title } = Astro.props;
+---
+
+<div class="code-example">
+  {title && <h3 style="font-family:var(--serif-display);margin:0 0 0.5rem;font-size:1.1rem;">{title}</h3>}
+  <div class="code-example-tabs">
+    <button class="code-example-tab active" onclick="switchTab(this, 'src')">Source: {srcFilename}</button>
+    <button class="code-example-tab" onclick="switchTab(this, 'output')">Output: {outputFilename}</button>
+  </div>
+  <div class="code-example-body">
+    <div id="src-tab" class="code-tab-content">
+      <pre><code class="language-{srcLanguage}">{srcCode}</code></pre>
+    </div>
+    <div id="output-tab" class="code-tab-content" style="display:none;">
+      <pre><code class="language-{outputLanguage}">{outputCode}</code></pre>
+    </div>
+  </div>
+</div>
+
+<script>
+  function switchTab(btn: HTMLElement, tab: string) {
+    const container = btn.closest('.code-example')!;
+    container.querySelectorAll('.code-example-tab').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    const srcTab = container.querySelector('#src-tab');
+    const outTab = container.querySelector('#output-tab');
+    if (srcTab && outTab) {
+      srcTab.style.display = tab === 'src' ? '' : 'none';
+      outTab.style.display = tab === 'output' ? '' : 'none';
+    }
+  }
+</script>

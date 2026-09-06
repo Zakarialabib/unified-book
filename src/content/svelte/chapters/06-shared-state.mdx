@@ -1,0 +1,149 @@
+---
+order: 6
+title: "Shared State"
+subtitle: "runes in modules, stores, and class state"
+description: "Component state is private by default. Shared state lives in .svelte.js modules, reactive classes, or classic stores — and each has a moment where it is exactly right."
+level: "Intermediate"
+---
+
+So far, every piece of state in this book has been born inside a component and died with it. That privacy is a feature — Chapter 3 argued that a component reaching outside itself is a design smell — but some state genuinely belongs to no single component: the current theme, the signed-in user, the contents of a cart. This chapter covers the three places shared state can live in Svelte 5, the failure mode that `.svelte.js` modules must be handled around, and an honest account of when the older store system is still the right tool.
+
+## Why shared state is a discipline
+
+The naive fix for prop drilling is to make state global, and the naive version of that fix is a plain module-level variable. It works until three things go wrong: the value changes and nothing re-renders, because a plain variable has no reactivity; every module that imports it can silently mutate it, because there is no boundary; and tests interfere with each other, because the "singleton" persists across them. SvelteKit adds a fourth: with server-side rendering, module state is shared across *requests*, so one user's data can leak into another's page if you are careless.
+
+So treat shared state as a designed surface, not an accident: a module with a clear API, mutations that happen through declared functions, and a shape that survives being imported from anywhere. The runes make that design pleasant, and the rest of the chapter is the pattern library.
+
+## State in .svelte.js modules
+
+Runes are not confined to `.svelte` files. Any module whose name ends in `.svelte.js` (or `.svelte.ts`) is compiled with the same reactivity, so it can export live state:
+
+```js
+// src/lib/theme.svelte.js
+export const theme = $state({
+  mode: 'light',
+  accent: 'orangered'
+});
+
+export function setMode(mode) {
+  theme.mode = mode;
+}
+```
+
+```svelte
+<!-- anywhere: ThemeToggle.svelte -->
+<script>
+  import { theme, setMode } from '$lib/theme.svelte';
+</script>
+
+<button onclick={() => setMode(theme.mode === 'light' ? 'dark' : 'light')}>
+  {theme.mode}
+</button>
+```
+
+Every importer sees the same live object — the component reading `theme.mode` re-renders when `setMode` runs, no matter how far apart they are in the tree. Now the one sharp edge, and it matters: **you cannot export a reassignable `$state` directly.** A line like `export let count = $state(0)` looks reasonable and is not: when another module imports `count`, it receives the *current value*, a snapshot — not the live binding. Reassigning `count` inside the module later updates nothing anywhere, because ES module exports are read-only views, not references. The fix is to never export the state itself as a reassignable thing. Export an object and mutate its properties — proxies from Chapter 2 make that reactive — or export functions that do the mutating, as `setMode` does above. Both give importers a stable handle on something alive.
+
+## Reactive classes
+
+When shared state comes with invariants and operations, a class keeps them together. Svelte 5 treats `$state` and `$derived` as class fields:
+
+```js
+// src/lib/cart.svelte.js
+export class Cart {
+  items = $state([]);
+
+  total = $derived(this.items.reduce((sum, item) => sum + item.price, 0));
+  count = $derived(this.items.length);
+
+  add(item) {
+    this.items.push(item);
+  }
+
+  remove(id) {
+    this.items = this.items.filter((item) => item.id !== id);
+  }
+
+  clear() {
+    this.items = [];
+  }
+}
+```
+
+A `new Cart()` is a fully reactive object: the template reading `cart.total` re-renders when `items` changes, because the derived fields track the `$state` array exactly as Chapter 2 described. The class shape earns its keep when behavior and state belong together — validation in `add`, an `itemCount` cap, persistence hooks — and when you want more than one instance (a cart per session, a player per track) with types your editor can navigate. Instantiate once in a module and export the instance, or export the class and let each consumer own a copy; both patterns have their place, and the reactive fields work identically either way.
+
+## The store contract
+
+Before runes, Svelte's shared-state answer was the *store* — and it is worth knowing precisely, because it is a lesson in minimal API design. A store is any object with one method:
+
+```js
+// the entire contract: subscribe, and get an unsubscribe back
+export function createCounter() {
+  let value = 0;
+  const subscribers = new Set();
+
+  return {
+    subscribe(run) {
+      subscribers.add(run);
+      run(value); // call immediately with the current value
+      return () => subscribers.delete(run);
+    },
+    increment() {
+      value += 1;
+      subscribers.forEach((run) => run(value));
+    }
+  };
+}
+```
+
+That is the whole protocol: `subscribe` takes a callback, calls it immediately with the current value, and returns an unsubscribe function. Anything obeying it is a store, and every part of the ecosystem — Svelte's own stores, RxJS observables via adapters, your hand-rolled objects — interoperates through it. The design wins over ad-hoc event emitters are the immediate first call (subscribers are never stale) and the returned cleanup (Chapter 5's acquire-release pairing, built into the contract). No framework object is required to satisfy it, which is why stores remain the lingua franca for publishing values from code that has never heard of Svelte.
+
+## writable, readable, derived
+
+Hand-rolling the contract teaches it; `svelte/store` ships the everyday versions. `writable` wraps a value with `set` and `update` methods; `readable` exposes no mutators at all, only a start function that runs when the first subscriber arrives; `derived` computes a store from other stores:
+
+```js
+// src/lib/stores.js
+import { writable, readable, derived } from 'svelte/store';
+
+export const count = writable(0);
+
+export const secondsSinceOpen = readable(0, (set) => {
+  const start = Date.now();
+  const id = setInterval(() => set(Math.floor((Date.now() - start) / 1000)), 1000);
+  return () => clearInterval(id);
+});
+
+export const doubled = derived(count, (value) => value * 2);
+```
+
+The `readable` start function is the contract's elegance in action: the interval only runs while someone is listening, and the returned cleanup fires when the last subscriber leaves — lazy resources for free. `derived` accepts several input stores and can itself return a cleanup for reactive-but-stateful derivations. Notice what these are not: they are not runes, so outside a component you read their current value with `get(store)`, and they do not benefit from compiler tracking. They are a runtime convention — portable, mature, and framework-agnostic in a way runes are not.
+
+## The $store auto-subscription
+
+Inside components, stores get one convenience that hides all the plumbing: prefix a store with `$` and Svelte subscribes on mount, unsubscribes on destroy, and treats the value as a reactive variable:
+
+```svelte
+<script>
+  import { count, doubled } from '$lib/stores';
+</script>
+
+<button onclick={() => count.update((n) => n + 1)}>
+  {count} doubled is {doubled}
+</button>
+```
+
+Reading `$count` in the template or script subscribes; assigning to `$count = 5` compiles to `count.set(5)`. The subscription lifecycle is tied to the component exactly as Chapter 5 promised, and the `$`-values participate in reactivity like any `$state`. The `$` prefix works in `.svelte.js` modules too, which is how runes-era code and store-era libraries cooperate: a runes component can consume a third-party store with `$store` one day and wrap it in a reactive class the next. Interop runs in both directions, so neither system traps you.
+
+## Choosing between runes and stores
+
+The honest decision table, in prose. **Default to runes** — `$state` in a `.svelte.js` module, or a reactive class — for state your own app owns: they need less ceremony, compose with `$derived` and `$effect`, and keep one mental model across the codebase. **Reach for a store** when the value is produced outside your control — an RxJS stream, a WebSocket adapter, a library that publishes via `subscribe` — because the contract means zero glue; when a value has many independent consumers that come and go, where `readable`'s lazy-start semantics genuinely help; or when you are publishing state from a package that must not require Svelte 5 to use. There is one more SvelteKit-shaped caveat: module-level shared state of *any* kind is per-server, not per-user, so request-scoped values belong in `load` functions and `locals`, which is Chapter 8's territory. Choose the mechanism by who owns the value's lifecycle, not by fashion — and then keep mutations behind declared functions, whichever mechanism you picked.
+
+## Key takeaways
+
+- Shared state is a designed API, not a global variable: module state without reactivity, boundaries, or reset care causes silent bugs and cross-request leaks.
+- Runes work in `.svelte.js` modules; export an object or mutations, never a reassignable `export let $state`, which importers see as a frozen snapshot.
+- Classes with `$state` and `$derived` fields bundle invariants with the data they protect, and support multiple instances with full reactivity.
+- A store is any object with `subscribe` returning an unsubscribe — the minimal contract that keeps the ecosystem interoperable.
+- `writable`, `readable`, and `derived` cover the store shapes; `$store` auto-subscription bridges stores into components; default to runes and reach for stores at interop and multi-consumer boundaries.
+
+State is settled. Chapter 7 adds motion — transitions and animations as template primitives rather than bolted-on libraries.

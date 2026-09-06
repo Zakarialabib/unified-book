@@ -1,0 +1,141 @@
+---
+order: 9
+title: "Shipping Svelte"
+subtitle: "adapters, testing, accessibility, and going live"
+description: "Adapters for every host, prerendering for speed, env secrets kept honest, tests from unit to end-to-end, and the accessibility discipline Svelte's compiler pushes you toward. The production checklist, end to end."
+level: "Advanced"
+---
+
+The last mile of a frontend project is where the compiler mental model from Chapter 1 pays its second dividend. Svelte already moved rendering work to build time; shipping is mostly about making the *remaining* decisions deliberate — where the output runs, what renders before JavaScript arrives, which secrets stay private, what is tested, and who the interface excludes if you are careless. None of this is glamorous, and all of it is the difference between a demo and a product.
+
+## What shipping means for a frontend
+
+A frontend ships when four questions have answers. *Where does it run?* — decided by an adapter, from a static file host to a Node server. *When does rendering happen?* — at build time, at request time, or in the browser, per route. *What does the code know?* — which environment variables are safe to inline and which must stay server-side. *What happens when it is wrong?* — tests that catch regressions and an accessibility posture that treats warnings as defects. SvelteKit gives each question a small, honest configuration surface, and this chapter walks them in order, finishing with a checklist you can run before any launch.
+
+## Adapters and deployment targets
+
+An adapter translates SvelteKit's output into a specific host's expectations. You pick one in `svelte.config.js`, and — this is the point — everything else about your app stays the same:
+
+```js
+// svelte.config.js
+import adapter from '@sveltejs/adapter-node';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+
+export default {
+  preprocess: vitePreprocess(),
+  kit: {
+    adapter: adapter({ precompress: true })
+  }
+};
+```
+
+`adapter-auto`, the default, detects common platforms (Vercel, Netlify, Cloudflare) and picks the right output for you. `adapter-node` produces a self-contained server — the right choice for containers, self-hosting, or running beside a Rust binary, including inside a Tauri app's build where your SvelteKit assets sit alongside code you compile with Cargo. `adapter-static` emits plain files for a CDN, with one contract: every route must be prerenderable, which is the next section's subject. Swapping hosts is a config change plus a build, not a refactor — deploy target is a decision you make late and can revise.
+
+## Prerendering and rendering strategies
+
+By default, SvelteKit renders pages on the server at request time and hydrates them in the browser — the best of both worlds, at the cost of a server. Two flags per route, settable in `+page.js` or `+layout.js`, shift the work:
+
+```js
+// src/routes/+layout.js
+export const prerender = true; // build HTML at build time
+// export const ssr = false;   // or skip server rendering entirely (SPA)
+```
+
+Prerendering runs your pages once, during `npm run build`, and writes the HTML to disk: instant responses, trivial hosting, and SEO for free — ideal for marketing sites, docs, and blogs, which is why `adapter-static` requires it. SvelteKit crawls your links from an entry point and prerenders everything reachable. The `ssr = false` escape hatch disables server rendering for a subtree — occasionally right for dashboards that are pure client state from the first pixel — and costs you first-paint speed and indexability, so opt in per route rather than globally. The discipline is to decide per route, not per project: a product can prerender its homepage, server-render its catalog, and client-render its admin, all in one app.
+
+## Environment variables and secrets
+
+SvelteKit makes the public/private boundary a compile-time fact instead of a naming convention you hope people follow:
+
+```ts
+// build-time, inlined into the bundle — safe in any component
+import { PUBLIC_API_URL } from '$env/static/public';
+
+// server-only: importing this from client code is a build error
+import { PRIVATE_STRIPE_KEY } from '$env/static/private';
+```
+
+Variables exposed to the browser must be prefixed `PUBLIC_`; everything else is private and importable only from server modules — `+page.server.ts`, `+server.ts`, and hooks — with the compiler rejecting violations at build time. The `static` variants are inlined when you build, which lets bundlers treat them as constants; the `$env/dynamic` variants read at runtime instead, for hosts where secrets rotate without a rebuild. The habit that keeps you honest: reach for `$env/static/private` first, because the import graph itself proves nothing leaked. This is the Chapter 1 promise applied to configuration — mistakes that would be production incidents become red squiggles.
+
+## Testing: unit, component, end-to-end
+
+Svelte projects test at three layers, and each has a standard tool. Unit tests cover pure logic with Vitest and need no Svelte at all:
+
+```ts
+// src/lib/pricing.test.ts
+import { describe, expect, it } from 'vitest';
+import { formatPrice } from './pricing';
+
+describe('formatPrice', () => {
+  it('renders minor units without drift', () => {
+    expect(formatPrice(1299)).toBe('12.99');
+  });
+});
+```
+
+Component tests mount real components with `@testing-library/svelte` and assert on what a user would perceive:
+
+```ts
+// src/lib/Rating.test.ts
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, expect, it, vi } from 'vitest';
+import Rating from './Rating.svelte';
+
+describe('Rating', () => {
+  it('reports selection through its callback prop', async () => {
+    const onSelect = vi.fn();
+    render(Rating, { props: { value: 0, onSelect } });
+    await fireEvent.click(screen.getByRole('button', { name: '4 of 5' }));
+    expect(onSelect).toHaveBeenCalledWith(4);
+  });
+});
+```
+
+Note what the test asserts: behavior through the component's public contract — the callback prop from Chapter 3, the accessible role — not its internals, which is what makes tests survive refactors. End-to-end tests drive a real browser with Playwright, exercising the full SvelteKit stack including server-rendered HTML:
+
+```ts
+// e2e/newsletter.spec.ts
+import { test, expect } from '@playwright/test';
+
+test('newsletter form rejects bad input', async ({ page }) => {
+  await page.goto('/newsletter');
+  await page.fill('input[name=email]', 'not-an-email');
+  await page.click('button:has-text("subscribe")');
+  await expect(page.getByText('that is not an email')).toBeVisible();
+});
+```
+
+The layering rule from the Rust chapter of your past applies verbatim: many fast unit and component tests, a few confident end-to-end tests on the critical paths — signup, checkout, the form above.
+
+## Accessibility as a build step
+
+Svelte's compiler treats accessibility as a build-time concern: it emits warnings for a catalog of defects — `a11y_missing_attribute` on unlabeled inputs, `a11y_click_events_have_key_events` on clickable divs, `a11y_invalid_attribute` on hrefless anchors — before your code ever reaches a browser. The culture that makes this valuable is refusing to normalize the warnings: a build with accessibility warnings is a failing build, the same standing you would give a type error. Silencing one with a comment is a decision that needs a written reason, because each silenced warning is a user who cannot use the feature.
+
+The compiler catches markup; interaction quality is yours. Two habits cover most of the ground: manage focus deliberately — after opening a dialog, move focus into it and restore it on close; after route changes, land the user somewhere sensible rather than at the top of an unannounced page. For the announcement half, newer Svelte versions ship a `svelte/a11y` module with an `announce` helper that pipes messages into a polite live region for screen readers:
+
+```svelte
+<script>
+  import { announce } from 'svelte/a11y';
+  import { page } from '$app/state';
+
+  $effect(() => {
+    if (page.data?.title) announce(`loaded: ${page.data.title}`);
+  });
+</script>
+```
+
+Test with a keyboard only, at least once per feature: tab through, operate every control, watch where focus lands. The `{#if}` blocks and event attributes from earlier chapters already generate semantic HTML; the remaining discipline is behavioral, and it fits in a checklist.
+
+## The launch checklist
+
+Run this before every release, in order. Build with `npm run build` and read the output — compiler warnings first, then bundle sizes, since Chapter 1's model means your bundle is *exactly* what you wrote plus what you imported; code-split heavy routes with dynamic imports. Confirm the rendering strategy per route: prerendered where content is static, server-rendered where it is personal, `ssr = false` only with a reason written down. Verify environment boundaries: no private import reachable from client code, `PUBLIC_` keys actually public. Run the three test layers in CI, with the end-to-end suite covering the paths that make money. Clear every accessibility warning, and keyboard-test the newest feature. Check the 404 and error pages, because `+error.svelte` is part of the product. And if the destination is a desktop app, the same checklist applies with `adapter-static` feeding a Tauri shell — your Rust side and this side sharing one build pipeline. None of these steps is hard; the checklist exists because each one is easy to skip exactly once, and that once is the launch.
+
+## Key takeaways
+
+- The adapter is the only deploy-target decision — `adapter-auto` for platforms, `adapter-node` for servers and containers, `adapter-static` for CDNs — and changing it changes nothing else.
+- Choose rendering per route: `prerender = true` for build-time HTML, SSR by default, `ssr = false` sparingly and with a reason.
+- `$env/static/public` inlines safe values; `$env/static/private` is server-only and enforced at build time, making secret leaks compile errors instead of incidents.
+- Test at three layers — Vitest units, `@testing-library/svelte` components through their public contract, Playwright flows through the real stack.
+- Accessibility warnings are build output: treat them as failing CI, manage focus deliberately, and use `svelte/a11y`'s `announce` for screen-reader-visible state changes.
+
+That closes the loop this book opened: a compiler that writes your plumbing, runes that make state legible, a framework that keeps the contract honest — and a launch where the remaining work is decisions, not heroics.

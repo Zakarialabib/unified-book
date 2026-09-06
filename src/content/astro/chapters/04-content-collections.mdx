@@ -1,0 +1,179 @@
+---
+order: 4
+title: "Content Collections"
+subtitle: "your content, typed and queryable"
+description: "Content collections give every markdown and MDX file a schema, a type, and a query API — the load-bearing feature behind blogs, docs, and changelogs. This is the chapter the rest of the book leans on."
+level: "Intermediate"
+---
+
+Every content site eventually hits the same failure mode. The blog started as a folder of markdown files, frontmatter hand-typed, and it worked — until a post shipped with `publishDate` instead of `date`, a draft got deployed because nothing filtered it, and the listing page turned into a pile of sort functions nobody trusts. The problem was never markdown; it was that the content had no *contract*. Astro's answer is content collections: every markdown and MDX file in a collection gets a zod schema validated at build time, TypeScript types inferred from that schema, and a query API to read it all. This is the load-bearing chapter of the book — blogs, docs, changelogs, even this book's own chapters are collections — and we will build one running example throughout: a blog with authors.
+
+## The problem with loose markdown
+
+A folder of markdown files is a database with no schema, and the bugs are the kind that only appear in production. Typos in frontmatter keys pass silently and surface as blank titles. Dates arrive as strings in three formats, and sorting them in page code means everyone re-implements the parse. Drafts need a filter written correctly in every page that lists posts. And nothing tells you a post is missing a required field until a visitor sees `undefined` where a byline should be.
+
+Collections fix this by moving the contract out of page code and into one place, then enforcing it when you build. A file that violates the schema fails the build with the offending file and field named — the same fail-early philosophy as `getStaticPaths` in Chapter 2. The page code stops defending itself, because the type system guarantees what an entry looks like.
+
+## Defining a collection
+
+A collection is declared in `src/content.config.ts` and backed by a *loader* — the code that reads entries from somewhere and hands Astro their ids and data. For files on disk, the glob loader is the standard choice; other loaders can pull from a CMS or an API, which we touch on in Chapter 6. Here is the running example, a blog plus the authors who write it:
+
+```ts
+// src/content.config.ts
+import { defineCollection, z } from "astro:content";
+import { glob } from "astro/loaders";
+
+const blog = defineCollection({
+  loader: glob({ pattern: "**/*.mdx", base: "./src/content/blog" }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string(),
+    pubDate: z.coerce.date(),
+    draft: z.boolean().default(false),
+    author: z.string(),
+  }),
+});
+
+const authors = defineCollection({
+  loader: glob({ pattern: "**/*.yaml", base: "./src/content/authors" }),
+  schema: z.object({
+    name: z.string(),
+    role: z.string(),
+  }),
+});
+
+export const collections = { blog, authors };
+```
+
+The glob loader watches `src/content/blog` recursively, and each file's path becomes its id: `src/content/blog/2025/hello-astro.mdx` is queryable as `2025/hello-astro`. The moment this config exists, `astro sync` generates types for every entry, and anything that queries the collection gets them. Note that the schema lives *with* the loader — one declaration owns where entries come from and what shape they are, and no page in the project has to know either.
+
+## Schemas with zod
+
+The schema is where the contract gets specific, and zod's vocabulary maps cleanly onto content concerns. Coerce messy input into real types, restrict fields to closed sets, mark optional fields, and give defaults for the common case:
+
+```ts
+const blog = defineCollection({
+  loader: glob({ pattern: "**/*.mdx", base: "./src/content/blog" }),
+  schema: z.object({
+    title: z.string(),
+    description: z.string().max(160),
+    pubDate: z.coerce.date(),
+    tags: z.array(z.enum(["frontend", "tooling", "performance"])).default([]),
+    draft: z.boolean().default(false),
+    author: z.string(),
+  }),
+});
+```
+
+With this in place, `"2025-01-14"` becomes a real `Date` at load time, a `tags: ["weird"]` is a build error naming the file, and every page that reads `post.data.tags` knows the array exists and contains only those three strings — no filtering, no fallbacks. The build-time failure is the feature working: it is exactly the typo-driven bug that loose markdown shipped silently, caught on your machine instead of in a browser. Schemas are also where editorial policy becomes enforceable; if the style guide says descriptions cap at 160 characters, that is now a `.max(160)` instead of a memo.
+
+## Querying with getCollection and getEntry
+
+Two functions cover almost every read. `getCollection("blog")` returns every entry in the collection; `getEntry("blog", id)` fetches one. Both return entries whose `data` is fully typed from the schema, and both accept a filter callback so the query layer stays in one place:
+
+```astro
+---
+// src/pages/blog/index.astro
+import { getCollection } from "astro:content";
+import PostCard from "../../components/PostCard.astro";
+
+const posts = await getCollection(
+  "blog",
+  ({ data }) => !data.draft,
+).then((entries) =>
+  entries.sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf()),
+);
+---
+<ul>
+  {posts.map((post) => <PostCard post={post} />)}
+</ul>
+```
+
+The draft filter lives here once, not in every listing; the sort is over real `Date` objects because the schema coerced them. `getEntry` is the single-post counterpart — by id, with the same types — and it is also how you resolve a cross-collection lookup, which the next section makes common. One habit to carry over from Chapter 2: do this querying in `getStaticPaths` when a route needs it, so the census does the work once and the page receives props.
+
+## Rendering entries
+
+An entry's markdown body is not a string you render yourself — Astro compiles it, and the `render()` function from `astro:content` hands you the finished component:
+
+```astro
+---
+// src/pages/blog/[slug].astro
+import { getCollection, getEntry, render } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog", ({ data }) => !data.draft);
+  return posts.map((post) => ({ params: { slug: post.id }, props: { post } }));
+}
+
+const { post } = Astro.props;
+const { Content, headings } = await render(post);
+const author = await getEntry("authors", post.data.author);
+---
+<BaseLayout title={post.data.title} description={post.data.description}>
+  <p>By {author.data.name}</p>
+  <article><Content /></article>
+</BaseLayout>
+```
+
+`render()` also returns `headings` — the outline of the document, ready to build a table of contents — and remark plugin metadata. The important part is what is missing: no markdown-it configuration, no sanitizing, no bespoke parsing in your code. The dynamic route here is exactly the Chapter 2 pattern, now fed by a collection instead of ad-hoc file reads, and the type-checked pipeline runs unbroken from schema to rendered HTML.
+
+## References between collections
+
+The example above reached into `authors` by hand, and that hand-rolled lookup is the first thing to rot when ids get renamed. `reference()` makes the relation explicit — the schema declares that `author` points at the authors collection, and Astro's types carry that fact everywhere:
+
+```ts
+import { reference, z } from "astro:content";
+
+const blog = defineCollection({
+  loader: glob({ pattern: "**/*.mdx", base: "./src/content/blog" }),
+  schema: z.object({
+    title: z.string(),
+    pubDate: z.coerce.date(),
+    draft: z.boolean().default(false),
+    author: reference("authors"),
+  }),
+});
+```
+
+In frontmatter, the author is still written as a plain id — `author: "rin"` — but when read back, `post.data.author` is a reference object you can resolve in one call:
+
+```astro
+---
+const author = await getEntry(post.data.author);
+---
+<AuthorChip name={author.data.name} role={author.data.role} />
+```
+
+If an id stops matching — an author file renamed, a typo in frontmatter — the build fails at validation instead of shipping a byline of `undefined`. The same mechanism handles any relation your content has: posts to series, docs to products, changelog entries to releases. Model relations in the schema and the query code stays boring, which is the highest compliment content code can receive.
+
+## MDX inside collections
+
+MDX is markdown that imports, and collections treat it as a first-class citizen: point the glob loader's pattern at `*.mdx`, and entries can use components directly in the body, with the same schema and query API as plain markdown:
+
+```mdx
+---
+title: "Static is a feature"
+description: "Rendering at build time is not a limitation."
+pubDate: 2025-01-14
+author: rin
+---
+
+import Callout from "../../components/Callout.astro";
+
+Renders happen once, on the build machine.
+
+<Callout kind="tip">Every dynamic route still needs `getStaticPaths`.</Callout>
+```
+
+The imports resolve through Vite like any other module, the components are the typed, slotted components of Chapter 3, and the schema validates the frontmatter identically. One practical note: because a collection can hold both extensions, a single glob with `**/*.{md,mdx}` keeps authors free to choose per post. There is one caveat worth respecting — a component imported into MDX renders for every entry that imports it, so keep the expensive ones out of content the way you would keep them out of a hot path anywhere else.
+
+## Key takeaways
+
+- Collections give markdown and MDX a contract: a glob loader for where entries come from and a zod schema for what they must contain, both declared in `src/content.config.ts`.
+- Schema violations fail the build with the file and field named, which converts silent production bugs into loud local ones.
+- `getCollection` and `getEntry` return fully typed entries; filtering and sorting belong at the query site, and `getStaticPaths` should absorb the work once per route.
+- `render(entry)` compiles an entry's body into a `Content` component, with `headings` for outlines — no manual markdown parsing anywhere.
+- `reference()` declares relations between collections, and `getEntry(post.data.author)` resolves them with the same build-time safety as everything else.
+
+Content now has a spine — but the pages built on it are still static. The moment a component needs to actually *run* in the browser, you need islands, and that is where the book goes next.

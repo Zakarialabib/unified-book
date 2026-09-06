@@ -1,0 +1,248 @@
+---
+order: 9
+title: "Shipping a CLI"
+subtitle: "from cargo new to crates.io"
+description: "The last mile of every project: argument parsing, error reporting, exit codes, tests, release profiles, and distribution. Build a real grep-like tool the way production Rust projects are structured — thin binary, testable core, documented release path."
+level: "Systems"
+---
+
+Everything before this chapter was the language. This chapter is the *practice* — the last mile between a working function and something a user installs with `cargo install` and runs in a terminal. We will build `findr`, a small grep-like tool, not because the world needs another grep, but because a CLI exercises every layer you have learned: ownership at the API boundary, `Result` discipline, iterators, `Send`/`Sync` in testing, and Cargo's release machinery. The structure you build here — thin binary, testable core — is the same shape you will use for services and Tauri backends.
+
+## Project layout: thin binary, testable core
+
+`cargo new findr` gives you a `main.rs` — and the single most valuable structural decision you can make on day one is to move the logic *out* of it:
+
+```text
+findr/
+├── Cargo.toml
+└── src/
+    ├── lib.rs      ← the engine: pure, testable, reusable
+    ├── main.rs     ← the shell: args, I/O, exit codes
+    └── bin/        ← (optional) extra binaries sharing lib.rs
+```
+
+The rule of thumb: **`main.rs` parses input and reports output; `lib.rs` does the work.** Library code can be unit-tested without spawning a process, reused by other binaries (or by your Tauri app's core), and evolves independently of the CLI skin. A `main.rs` you can print on one screen is a quiet signal of a healthy project.
+
+## Parsing arguments with clap
+
+Arguments arrive raw in `std::env::args()` — strings, in order, no help text, no validation. For anything beyond one flag, use **clap**, the ecosystem standard, whose derive API turns a struct into a full-featured CLI:
+
+```toml
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+```
+
+```rust
+use clap::Parser;
+use std::path::PathBuf;
+
+/// Search for a pattern in a file and display the lines that match.
+#[derive(Parser, Debug)]
+#[command(name = "findr", version, about)]
+struct Args {
+    /// The pattern to search for
+    pattern: String,
+
+    /// The path of the file to read
+    path: PathBuf,
+
+    /// Case-insensitive matching
+    #[arg(short, long)]
+    ignore_case: bool,
+}
+
+fn main() {
+    let args = Args::parse(); // exits with usage message if invalid
+    println!("searching for '{}' in {}", args.pattern, args.path.display());
+}
+```
+
+That derive alone buys `--help` and `--version` with formatted output, type-validated positional args, flags, and error messages users can act on. The doc comments become the help text — documentation and UX from one source. Notice the types doing chapter 2's work: `PathBuf` rather than `String` for the path means invalid-path handling is a type-level concern, not a runtime convention.
+
+## The core: find_matches in lib.rs
+
+The engine is a pure function — no I/O, no global state, trivially testable:
+
+```rust
+// src/lib.rs
+pub fn find_matches<'a>(content: &'a str, pattern: &str, ignore_case: bool) -> Vec<&'a str> {
+    if ignore_case {
+        let lowered = pattern.to_lowercase();
+        content
+            .lines()
+            .filter(|line| line.to_lowercase().contains(&lowered))
+            .collect()
+    } else {
+        content
+            .lines()
+            .filter(|line| line.contains(pattern))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_matching_lines() {
+        let text = "alpha\nbeta\nalphabet";
+        assert_eq!(find_matches(text, "alpha", false), vec!["alpha", "alphabet"]);
+    }
+
+    #[test]
+    fn ignores_case_when_asked() {
+        let text = "Alpha\nbeta";
+        assert_eq!(find_matches(text, "alpha", true), vec!["Alpha"]);
+    }
+
+    #[test]
+    fn no_matches_is_empty() {
+        assert!(find_matches("one\ntwo", "zzz", false).is_empty());
+    }
+}
+```
+
+The lifetimes in the signature are chapter 2 speaking plainly: the returned lines borrow from `content` — no copies, and the compiler enforces that the caller keeps the buffer alive. `cargo test` runs this suite in milliseconds, no process spawning, no filesystem. A real tool would return an iterator instead of a `Vec` (chapter 3's `Iterator` trait) to stream lazily; the `Vec` keeps the example legible.
+
+## main.rs: errors, exit codes, and the two streams
+
+Now the shell, with the error policy from chapter 4 executed precisely — read the file, fail with a message on **stderr**, exit non-zero:
+
+```rust
+use clap::Parser;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use findr::find_matches;
+
+/// Search for a pattern in a file and display the lines that match.
+#[derive(Parser, Debug)]
+#[command(name = "findr", version, about)]
+struct Args {
+    /// The pattern to search for
+    pattern: String,
+
+    /// The path of the file to read
+    path: PathBuf,
+
+    /// Case-insensitive matching
+    #[arg(short, long)]
+    ignore_case: bool,
+}
+
+fn main() -> ExitCode {
+    let args = Args::parse();
+
+    let content = match std::fs::read_to_string(&args.path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("findr: cannot read {}: {e}", args.path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for line in find_matches(&content, &args.pattern, args.ignore_case) {
+        if writeln!(out, "{line}").is_err() {
+            // downstream closed the pipe (e.g. `findr x file | head -1`)
+            return ExitCode::from(0);
+        }
+    }
+
+    ExitCode::SUCCESS
+}
+```
+
+Three conventions separate toys from tools here. **Exit codes are the API**: `0` success, non-zero failure — shell scripts, CI, and other tools key off them, and `ExitCode` makes the contract visible in the signature. **stderr is for humans, stdout is for data**: errors go to `eprintln!`/stderr so that piping (`findr pattern file | wc -l`) stays clean. **SIGPIPE happens**: when the consumer closes early, writing to stdout errors — treating that as success (or a quiet exit) is what makes your tool behave like a good Unix citizen instead of a panic machine. For quick prototypes, `fn main() -> Result<(), Box<dyn std::error::Error>>` gets you partway; explicit `ExitCode` handling is what you graduate to.
+
+## Integration testing: the black box
+
+Unit tests cover the engine; integration tests cover the *product* — the actual binary, invoked exactly as a user would, via **`assert_cmd`** and **`predicates`**:
+
+```toml
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+```
+
+```rust
+// tests/cli.rs
+use assert_cmd::Command;
+use predicates::str::contains;
+use std::io::Write;
+
+fn fixture() -> std::path::PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push("findr-test.txt");
+    let mut f = std::fs::File::create(&dir).unwrap();
+    writeln!(f, "needle in line one").unwrap();
+    writeln!(f, "nothing here").unwrap();
+    writeln!(f, "second needle").unwrap();
+    dir
+}
+
+#[test]
+fn prints_matching_lines() {
+    Command::cargo_bin("findr")
+        .unwrap()
+        .args(["needle", fixture().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(contains("needle in line one"))
+        .stdout(contains("second needle"));
+}
+
+#[test]
+fn missing_file_fails_with_message() {
+    Command::cargo_bin("findr")
+        .unwrap()
+        .args(["x", "/no/such/file"])
+        .assert()
+        .failure()
+        .stderr(contains("cannot read"));
+}
+```
+
+`Command::cargo_bin` resolves your compiled binary; `.assert()` drives it as a subprocess and checks status, stdout, and stderr. These tests catch what unit tests cannot: argument wiring, exit codes, stream discipline. Together with the unit suite, they are the safety net for every future refactor.
+
+## The release build
+
+Debug builds are for development; `cargo build --release` is what ships — different profile, different numbers:
+
+```toml
+[profile.release]
+lto = true             # cross-crate inlining: smaller, faster
+codegen-units = 1      # better optimization, slower compile
+strip = true           # no symbols in the binary
+```
+
+Three useful habits. **Benchmark with `hyperfine`** (`hyperfine './target/release/findr pattern file'`) instead of guessing — measure, then tune. **Check the binary size** with `cargo bloat`/`cargo asm` when size matters; `strip` and `lto` often cut it by a third. **Pin your MSRV** (`rust-version = "1.75"` in `Cargo.toml`) so users on older toolchains get a clear error instead of a mystery.
+
+## Distribution: from git to crates.io
+
+The distribution ladder, in ascending order of polish. `cargo install --path .` — local install from source, the developer path. `cargo install findr` — from **crates.io**: run `cargo login`, check `cargo package` (which builds and warns about missing files), then `cargo publish`. The registry is for Rust developers; it is the default expectation of the ecosystem, semver applies, and `cargo doc --open` should have something to say. Finally, **prebuilt binaries** for everyone else: GitHub Releases driven by CI, with `cross` (Docker-based) or `cargo-zigbuild` for targeting Linux/macOS/Windows triples from one machine:
+
+```yaml
+# .github/workflows/release.yml (excerpt)
+- name: Build
+  run: cargo build --release
+- name: Release
+  uses: softprops/action-gh-release@v2
+  with:
+    files: target/release/findr
+```
+
+A matrix of targets gives macOS, Linux (glibc and musl), and Windows artifacts from one tag push. And when a CLI is the wrong shape — users need windows, buttons, a file picker — the architecture you already built pays off a second time: the `lib.rs` core drops into a Tauri shell unchanged, and the CLI was the first, smallest customer of the same engine.
+
+## Key takeaways
+
+- Split every project into a thin `main.rs` (args, I/O, exit codes) and a testable `lib.rs` core — reuse and testability follow structurally.
+- clap's derive turns a documented struct into a full CLI: help, version, validation, and good errors for free.
+- Respect the Unix contract: exit codes as API, errors on stderr, data on stdout, and graceful SIGPIPE behavior.
+- Test the engine with unit tests, the product with `assert_cmd` integration tests — both, always.
+- Ship deliberately: `--release` with `lto`/`strip`, an MSRV in `Cargo.toml`, crates.io for developers, prebuilt binaries via CI for everyone else.
+
+That closes the loop the book opened: nine chapters from a value's single owner to a published binary — the same thread of compile-time guarantees running through all of it. Where you take it next — Tauri cores, services, embedded, a language of your own — the fundamentals travel with you.

@@ -1,0 +1,60 @@
+---
+interface Props {
+  currentTheme?: string;
+}
+const { currentTheme = 'light' } = Astro.props;
+---
+
+<div class="theme-library">
+  <h3>Themes</h3>
+  <div class="theme-grid">
+    <button class="theme-option" data-theme="light" data-series="The Astro Ecosystem" style="--theme-accent: #5628b4;">
+      <span class="theme-swatch" style="background: linear-gradient(135deg, #5628b4, #c92907);"></span>
+      <span class="theme-name">Ae — Astro Ecosystem</span>
+    </button>
+    <button class="theme-option" data-theme="light" data-series="Reactivity with Svelte" style="--theme-accent: #c92907;">
+      <span class="theme-swatch" style="background: linear-gradient(135deg, #c92907, #4a7c3c);"></span>
+      <span class="theme-name">Sv — Svelte</span>
+    </button>
+    <button class="theme-option" data-theme="light" data-series="Systems Programming in Rust" style="--theme-accent: #c92907;">
+      <span class="theme-swatch" style="background: linear-gradient(135deg, #c92907, #5628b4);"></span>
+      <span class="theme-name">Fe — Rust</span>
+    </button>
+    <button class="theme-option" data-theme="dim" data-series="Unified" style="--theme-accent: #b39af0;">
+      <span class="theme-swatch" style="background: linear-gradient(135deg, #16120d, #2a2318);"></span>
+      <span class="theme-name">Dark — Unified</span>
+    </button>
+    <button class="theme-option" data-theme="book" data-series="Unified Book" style="--theme-accent: #7a4c18;">
+      <span class="theme-swatch" style="background: linear-gradient(135deg, #fdf6e3, #e8dcc8);"></span>
+      <span class="theme-name">Book — Paper</span>
+    </button>
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.theme-option').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const theme = btn.dataset.theme || 'light';
+      const series = btn.dataset.series || 'Unified Book';
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.dataset.series = series;
+      localStorage.setItem('unifiedbook-theme', theme);
+      localStorage.setItem('unifiedbook-series', series);
+      document.querySelectorAll('.theme-option').forEach((b) => b.classList.remove('selected'));
+      btn.classList.add('selected');
+    });
+  });
+</script>
+
+<style>
+  .theme-library h3 { font-family: var(--serif-display); margin: 0 0 0.5rem; }
+  .theme-grid { display: flex; gap: 0.75rem; flex-wrap: wrap; }
+  .theme-option {
+    display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+    border: 1px solid var(--rule); border-radius: 8px; padding: 0.5rem;
+    background: var(--bg-2); cursor: pointer; transition: border-color 0.2s;
+  }
+  .theme-option:hover, .theme-option.selected { border-color: var(--accent); }
+  .theme-swatch { width: 2rem; height: 2rem; border-radius: 6px; }
+  .theme-name { font-family: var(--serif-display); font-size: 0.72rem; color: var(--ink-2); }
+</style>
