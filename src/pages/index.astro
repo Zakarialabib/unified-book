@@ -53,19 +53,19 @@ const totalMinutes = allRows.reduce((acc, r) => acc + r.minutes, 0);
     <!-- Series cards -->
     <section class="wrap">
       <div class="series-grid">
-        <a class="series-card" href="/chapters/astro">
+        <a class="series-card" href="/chapters/01-the-astro-way/">
           <div class="card-fe">Ae</div>
           <div class="card-title">The Astro Ecosystem</div>
           <div class="card-desc">Content-first sites, islands architecture, zero JS by default. From MDX content collections to Starlight docs and shipping.</div>
           <div class="card-count">{astroChapters.length} chapters · {astroChapters.reduce((acc, c) => acc + readingTime(c.body), 0)} min</div>
         </a>
-        <a class="series-card" href="/chapters/svelte">
+        <a class="series-card" href="/chapters/01-the-svelte-way/">
           <div class="card-fe" style="color: #c92907">Sv</div>
           <div class="card-title">Reactivity with Svelte</div>
           <div class="card-desc">Runes, components, bindings, effects, shared state, transitions, SvelteKit, and shipping. Reactivity as language, not library.</div>
           <div class="card-count">{svelteChapters.length} chapters · {svelteChapters.reduce((acc, c) => acc + readingTime(c.body), 0)} min</div>
         </a>
-        <a class="series-card" href="/chapters/rust">
+        <a class="series-card" href="/chapters/01-memory-and-ownership/">
           <div class="card-fe" style="color: #c92907">Fe</div>
           <div class="card-title">Systems Programming in Rust</div>
           <div class="card-desc">Memory and ownership, borrowing, traits, concurrency, async, unsafe, FFI, and shipping a CLI. Compile-time guarantees.</div>
@@ -88,7 +88,7 @@ const totalMinutes = allRows.reduce((acc, r) => acc + r.minutes, 0);
         {
           allRows.map((c) => (
             <li class="ch-row" data-slug={c.id} data-collection={c.collection}>
-              <a href={`/chapters/${c.collection}/${c.id}/`}>
+              <a href={`/chapters/${c.id}/`}>
                 <span class="ch-num">{String(c.data.order).padStart(2, '0')}</span>
                 <span class="ch-body">
                   <span class="ch-title">{c.data.title}</span>
@@ -189,7 +189,7 @@ const totalMinutes = allRows.reduce((acc, r) => acc + r.minutes, 0);
     const firstUnread = rows.find((r) => !read.includes(r.dataset.slug || ''));
     if (continueLink && rows.length) {
       const target = firstUnread || rows[rows.length - 1];
-      continueLink.setAttribute('href', target.dataset.slug ? `/chapters/${target.dataset.collection}/${target.dataset.slug}/` : '#');
+      continueLink.setAttribute('href', target.dataset.slug ? `/chapters/${target.dataset.slug}/` : '#');
       continueLink.textContent = n === 0 ? 'Start reading →' : n === rows.length ? 'Read it again →' : 'Continue reading →';
     }
   }

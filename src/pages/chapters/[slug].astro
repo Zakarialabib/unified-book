@@ -24,7 +24,13 @@ const entry = allFlat.find((e) => e.id === slug);
 if (!entry) throw new Error(`Chapter ${slug} not found`);
 const collection = entry._coll || 'astro';
 
-const sorted = allFlat.sort((a, b) => a.data.order - b.data.order);
+const sorted = allFlat.sort((a, b) => {
+  const order = { astro: 0, svelte: 1, rust: 2 };
+  const ca = order[a._coll] ?? 99;
+  const cb = order[b._coll] ?? 99;
+  if (ca !== cb) return ca - cb;
+  return a.data.order - b.data.order;
+});
 const total = sorted.length;
 const idx = sorted.findIndex((e) => e.id === slug);
 const prev = idx > 0 ? sorted[idx - 1] : null;
